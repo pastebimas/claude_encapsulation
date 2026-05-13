@@ -5,6 +5,8 @@ projects/
 !projects/.gitkeep
 !data/.gitkeep
 !claude-config/.gitkeep
+!claude-config/settings.json
+!claude-config/CLAUDE.md
 .idea
 compose.override.yml
 .claude
