@@ -1,0 +1,63 @@
+name: tmt-ai
+
+services:
+  tmt-ai-proxy:
+    build:
+      context: ./tmt-ai-proxy
+    container_name: tmt-ai-proxy
+    ports:
+      - "127.0.0.1:8033:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      TARGET_API_URL: https://api.anthropic.com
+      PROJECT_ROOT: /workspace
+      DEFAULT_PROJECT: default
+    restart: unless-stopped
+
+  tmt-ai-datasette:
+    build:
+      context: ./tmt-ai-datasette
+    container_name: tmt-ai-datasette
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      - tmt-ai-proxy
+    restart: unless-stopped
+
+  # allows docker commands to be run from within the container.
+  # Disable if you dont neet it as it could become a security risk.'
+  tmt-ai-docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: tmt-ai-docker-proxy
+    environment:
+      CONTAINERS: 1
+      EXEC: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  tmt-ai-code:
+    build:
+      context: ./tmt-ai-code
+    container_name: tmt-ai-code
+    command: ["sleep", "infinity"]
+    tty: true
+    stdin_open: true
+    working_dir: /workspace
+    environment:
+      CLAUDE_CONFIG_DIR: /claude
+      ANTHROPIC_BASE_URL: http://tmt-ai-proxy:8080
+      DOCKER_HOST: tcp://tmt-ai-docker-proxy:2375
+      USER_UID: ${USER_UID:-1000}
+      USER_GID: ${USER_GID:-1000}
+    volumes:
+      - ./claude-config:/claude
+      # Project mounts live in compose.override.yml (gitignored).
+    depends_on:
+      - tmt-ai-proxy
+      - tmt-ai-docker-proxy
+    restart: unless-stopped

@@ -1,0 +1,10 @@
+# Runtime state — never commit auth tokens or request logs.
+claude-config/
+data/
+projects/
+!projects/.gitkeep
+!data/.gitkeep
+!claude-config/.gitkeep
+.idea
+compose.override.yml
+.claude

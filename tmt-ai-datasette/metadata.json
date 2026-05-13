@@ -1,0 +1,12 @@
+{
+  "title": "Claude Code API Logs (per project)",
+  "description": "One database per project, populated by claude-proxy. Pick a project on the left, then browse 'request_logs' or run SQL.",
+  "license": "",
+  "source": "claude-proxy",
+  "source_url": "",
+  "plugins": {
+    "datasette-json-html": {
+      "columns": ["request_headers", "request_body", "response_headers", "response_body"]
+    }
+  }
+}

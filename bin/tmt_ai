@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# tmt_ai — launch Claude Code inside the long-lived `tmt-ai-code` container,
+# from any directory on the host.
+#
+set -euo pipefail
+
+CONTAINER=tmt-ai-code
+DEFAULT_PROJECT=tmt
+
+usage() {
+    cat <<'EOF'
+Usage:
+  tmt_ai                       open claude in /workspace/tmt (default)
+  tmt_ai <project>             open claude in /workspace/<project>
+  tmt_ai <project> <args...>   pass extra args to `claude`
+  tmt_ai -s [project]          drop into bash in /workspace/<project>
+  tmt_ai -l                    list projects mapped under /workspace
+  tmt_ai -h | --help           show this help
+EOF
+}
+
+ensure_running() {
+    if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+        echo "error: container '$CONTAINER' is not running." >&2
+        echo "hint:  cd into the compose project and run:" >&2
+        echo "       USER_UID=\$(id -u) USER_GID=\$(id -g) docker compose up -d" >&2
+        exit 1
+    fi
+}
+
+list_projects() {
+    ensure_running
+    docker exec "$CONTAINER" sh -c 'ls -1 /workspace 2>/dev/null'
+}
+
+shell_mode=0
+case "${1:-}" in
+    -h|--help)  usage; exit 0 ;;
+    -l|--list)  list_projects; exit 0 ;;
+    -s|--shell) shell_mode=1; shift ;;
+esac
+
+project="${1:-$DEFAULT_PROJECT}"
+shift || true
+
+ensure_running
+
+if ! docker exec "$CONTAINER" test -d "/workspace/$project"; then
+    echo "error: /workspace/$project does not exist inside $CONTAINER." >&2
+    echo "known projects:" >&2
+    list_projects | sed 's/^/  - /' >&2
+    exit 1
+fi
+
+uid_gid="$(id -u):$(id -g)"
+
+if [ "$shell_mode" -eq 1 ]; then
+    exec docker exec -it --user "$uid_gid" \
+        -w "/workspace/$project" "$CONTAINER" bash
+fi
+
+exec docker exec -it --user "$uid_gid" \
+    -w "/workspace/$project" "$CONTAINER" claude "$@"

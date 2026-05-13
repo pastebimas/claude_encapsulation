@@ -1,0 +1,8 @@
+services:
+  tmt-ai-code:
+    volumes:
+      # <host path>:/workspace/<project-name>
+      # The project name is what shows up in data/<project-name>.db.
+      # docker compose auto-merges this file with compose.yml.
+      - ~/code/my-app:/workspace/my-app
+      - ~/code/fancy-wordpress-page:/workspace/fancy-wordpress-page
