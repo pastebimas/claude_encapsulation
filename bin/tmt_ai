@@ -8,15 +8,27 @@ set -euo pipefail
 CONTAINER=tmt-ai-code
 DEFAULT_PROJECT=tmt
 
+# Resolve symlinks so we know where compose.override.yml lives even if tmt_ai is on PATH via symlink.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+    _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+    _src="$(readlink "$_src")"
+    [[ "$_src" != /* ]] && _src="$_dir/$_src"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_src")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+OVERRIDE_FILE="$PROJECT_ROOT/compose.override.yml"
+
 usage() {
     cat <<'EOF'
 Usage:
-  tmt_ai                       open claude in /workspace/tmt (default)
-  tmt_ai <project>             open claude in /workspace/<project>
-  tmt_ai <project> <args...>   pass extra args to `claude`
-  tmt_ai -s [project]          drop into bash in /workspace/<project>
-  tmt_ai -l                    list projects mapped under /workspace
-  tmt_ai -h | --help           show this help
+  tmt_ai                          open claude in /workspace/tmt (default)
+  tmt_ai <project>                open claude in /workspace/<project>
+  tmt_ai <project> <args...>      pass extra args to `claude`
+  tmt_ai -s [project]             drop into bash in /workspace/<project>
+  tmt_ai -l                       list projects mapped under /workspace
+  tmt_ai -a <path> [name]         add host <path> as /workspace/<name> mount
+  tmt_ai -h | --help              show this help
 EOF
 }
 
@@ -34,10 +46,69 @@ list_projects() {
     docker exec "$CONTAINER" sh -c 'ls -1 /workspace 2>/dev/null'
 }
 
+add_project() {
+    local path="${1:-}"
+    local name="${2:-}"
+    if [ -z "$path" ]; then
+        echo "error: usage: tmt_ai -a <path> [name]" >&2
+        exit 1
+    fi
+
+    path="${path/#\~/$HOME}"
+
+    if [ ! -d "$path" ]; then
+        echo "error: '$path' is not a directory on the host." >&2
+        exit 1
+    fi
+    local abs_path
+    abs_path="$(cd "$path" && pwd)"
+
+    if [ -z "$name" ]; then
+        name="$(basename "$abs_path")"
+    fi
+
+    if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "error: project name '$name' must match [A-Za-z0-9_-]+." >&2
+        exit 1
+    fi
+
+    if [ ! -f "$OVERRIDE_FILE" ]; then
+        cat >"$OVERRIDE_FILE" <<'YAML'
+services:
+  tmt-ai-code:
+    volumes:
+YAML
+    fi
+
+    if grep -qE ":/workspace/${name}([[:space:]]|$)" "$OVERRIDE_FILE"; then
+        echo "error: /workspace/$name is already mapped in $OVERRIDE_FILE." >&2
+        exit 1
+    fi
+
+    if ! grep -qE '^[[:space:]]+volumes:[[:space:]]*$' "$OVERRIDE_FILE"; then
+        echo "error: $OVERRIDE_FILE has no 'volumes:' key — edit by hand." >&2
+        exit 1
+    fi
+
+    echo "      - $abs_path:/workspace/$name" >> "$OVERRIDE_FILE"
+
+    cat <<EOF
+added: $abs_path -> /workspace/$name
+
+apply with:
+  docker compose -f "$PROJECT_ROOT/compose.yml" up -d tmt-ai-code
+
+this recreates tmt-ai-code (drops in-flight claude sessions).
+after the project's first request lands a data/$name.db, also:
+  docker compose -f "$PROJECT_ROOT/compose.yml" restart tmt-ai-datasette
+EOF
+}
+
 shell_mode=0
 case "${1:-}" in
     -h|--help)  usage; exit 0 ;;
     -l|--list)  list_projects; exit 0 ;;
+    -a|--add)   shift; add_project "$@"; exit 0 ;;
     -s|--shell) shell_mode=1; shift ;;
 esac
 

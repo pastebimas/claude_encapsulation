@@ -3,7 +3,10 @@
 FROM node:22-alpine
 
 # git: most projects need it. su-exec: drop privileges to USER_UID. bash: required shell.
-RUN apk add --no-cache git su-exec bash docker-cli
+# curl/jq/openssl/make/ripgrep/sqlite/zip/xz: common agent reach-fors.
+RUN apk add --no-cache \
+    git su-exec bash docker-cli \
+    curl jq openssl make ripgrep sqlite zip xz
 
 # Pin to the 2.1.x line that matches this compose setup.
 RUN npm install -g @anthropic-ai/claude-code@~2.1.0
