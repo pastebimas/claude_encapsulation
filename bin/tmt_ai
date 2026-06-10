@@ -20,15 +20,25 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 OVERRIDE_FILE="$PROJECT_ROOT/compose.override.yml"
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 Usage:
   tmt_ai                          open claude in /workspace/tmt (default)
   tmt_ai <project>                open claude in /workspace/<project>
-  tmt_ai <project> <args...>      pass extra args to `claude`
+  tmt_ai <project> <args...>      pass extra args to \`claude\`
   tmt_ai -s [project]             drop into bash in /workspace/<project>
   tmt_ai -l                       list projects mapped under /workspace
   tmt_ai -a <path> [name]         add host <path> as /workspace/<name> mount
   tmt_ai -h | --help              show this help
+
+Adding a new project:
+  1. tmt_ai -a ~/path/to/repo [name]
+  2. (cd "$PROJECT_ROOT" && docker compose up -d tmt-ai-code)
+     (recreates tmt-ai-code so the new volume mount is loaded;
+      drops in-flight claude sessions. Must run from the project dir
+      so compose.override.yml is auto-merged — an explicit -f compose.yml
+      skips the override and unmounts every project.)
+  3. after first request lands data/<name>.db:
+     (cd "$PROJECT_ROOT" && docker compose restart tmt-ai-datasette)
 EOF
 }
 
@@ -56,12 +66,15 @@ add_project() {
 
     path="${path/#\~/$HOME}"
 
-    if [ ! -d "$path" ]; then
-        echo "error: '$path' is not a directory on the host." >&2
-        exit 1
+    local abs_path=""
+    if [ -d "$path" ]; then
+        abs_path="$(cd "$path" && pwd)"
+    elif [[ "$path" != /* ]] && [ -d "$PROJECT_ROOT/$path" ]; then
+        abs_path="$(cd "$PROJECT_ROOT/$path" && pwd)"
+    else
+        abs_path="$path"
+        echo "warning: '$path' not found on host; adding mount as-is." >&2
     fi
-    local abs_path
-    abs_path="$(cd "$path" && pwd)"
 
     if [ -z "$name" ]; then
         name="$(basename "$abs_path")"
@@ -96,11 +109,11 @@ YAML
 added: $abs_path -> /workspace/$name
 
 apply with:
-  docker compose -f "$PROJECT_ROOT/compose.yml" up -d tmt-ai-code
+  (cd "$PROJECT_ROOT" && docker compose up -d tmt-ai-code)
 
 this recreates tmt-ai-code (drops in-flight claude sessions).
 after the project's first request lands a data/$name.db, also:
-  docker compose -f "$PROJECT_ROOT/compose.yml" restart tmt-ai-datasette
+  (cd "$PROJECT_ROOT" && docker compose restart tmt-ai-datasette)
 EOF
 }
 

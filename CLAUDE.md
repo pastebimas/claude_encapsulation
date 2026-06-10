@@ -72,6 +72,23 @@ prompting.
 Using `:8033` from inside the network causes `ConnectionRefused`.
 If the user reports that symptom, check `ANTHROPIC_BASE_URL` first.
 
+## Never `docker compose -f compose.yml` — it drops every mount
+
+All `/workspace/*` bind mounts live in `compose.override.yml`. An
+explicit `-f compose.yml` disables Compose's automatic loading of the
+override, so `tmt-ai-code` comes up with an empty `/workspace` and
+every project disappears (`tmt_ai <name>` → "does not exist", `-l`
+lists nothing).
+
+Always run Compose from the project dir with no `-f` so the override
+auto-merges:
+```
+(cd <project-root> && docker compose up -d tmt-ai-code)
+```
+`bin/tmt_ai` prints commands in this form — do not "simplify" them
+back to `-f "$PROJECT_ROOT/compose.yml"`. Sanity check:
+`docker compose config | grep -c /workspace/` should be non-zero.
+
 ## Where logs and config live
 
 - `data/<name>.db` — SQLite, one per mapped project.

@@ -18,7 +18,7 @@ cd tmt-ai
 
 # 1. List the host folders you want to expose to the container.
 cp compose.override.yml.example compose.override.yml
-$EDITOR compose.override.yml
+Add your projects paths to compose.override.yml
 
 # 2. Build and start (USER_UID keeps file ownership sane).
 USER_UID=$(id -u) USER_GID=$(id -g) docker compose up -d --build

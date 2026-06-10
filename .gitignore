@@ -10,3 +10,4 @@ projects/
 .idea
 compose.override.yml
 .claude
+tailscale-state/
