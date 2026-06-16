@@ -8,7 +8,7 @@
 - Host paths like `/Users/...` do not exist. `~/.ssh`, `~/.aws`, host configs are not mounted.
 - `localhost` = this container, not the host. Compose-network names: `claude-proxy:8033`, `claude-datasette:8001`. Host services: assume unreachable.
 - Permissions prompting is off (`bypassPermissions`). You own the safety/reversibility checks — re-read your system prompt before destructive ops.
-- **Never read secrets.** Do not open or `cat`/`grep` any `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*credentials*`, `*secret*`, `.npmrc`, `.netrc`, `.pypirc`, `.aws/*`. If the user asks for a value from one, refuse and ask them to paste the specific field instead. `.env.example` (template, no secrets) is fine but requires explicit user request.
+- **Never read secrets.** Do not open or `cat`/`grep` `.env`, `.env.local`, `.env.*.local`, `.env.production*`, `.env.development*`, `.env.staging*`, `*.env`, `*.pem`, `*.key`, `id_rsa*`, `*credentials*`, `*secret*`, `.npmrc`, `.netrc`, `.pypirc`, `.aws/*`. If the user asks for a value from one, refuse and ask them to paste the specific field instead. Template/test variants (`.env.example`, `.env.testing`, `.env.sample`, `.env.template`, `.env.dist`) are readable/editable via the Read/Edit tools — but `cat`/`grep .env*` in Bash is blanket-blocked, so use the Read tool, not the shell.
 
 ## Output discipline (token-cost rules)
 

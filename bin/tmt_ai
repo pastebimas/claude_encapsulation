@@ -139,10 +139,22 @@ fi
 
 uid_gid="$(id -u):$(id -g)"
 
+# Pin the terminal window + tab title to the project name. claude is told to
+# leave the title alone via CLAUDE_CODE_DISABLE_TERMINAL_TITLE, so it stays put
+# instead of churning with task progress.
+set_title() {
+    [ -t 1 ] || return 0
+    printf '\033]0;%s\007' "$1"
+}
+
 if [ "$shell_mode" -eq 1 ]; then
+    set_title "$project"
     exec docker exec -it --user "$uid_gid" \
+        -e CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
         -w "/workspace/$project" "$CONTAINER" bash
 fi
 
+set_title "$project"
 exec docker exec -it --user "$uid_gid" \
+    -e CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
     -w "/workspace/$project" "$CONTAINER" claude "$@"
