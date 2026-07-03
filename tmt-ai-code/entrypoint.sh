@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # Entrypoint for the Claude Code container.
 # Maps the container user to USER_UID:USER_GID so bind-mounted files
@@ -16,7 +16,7 @@ fi
 
 # Resolve a group with USER_GID, creating "claude" if free.
 if ! getent group "$USER_GID" >/dev/null 2>&1; then
-    addgroup -g "$USER_GID" claude 2>/dev/null || true
+    groupadd -g "$USER_GID" claude 2>/dev/null || true
     GROUP_NAME="claude"
 else
     EXISTING_GROUP=$(getent group "$USER_GID" | cut -d: -f1)
@@ -25,7 +25,7 @@ fi
 
 # Resolve a user with USER_UID, creating "claude" if free.
 if ! getent passwd "$USER_UID" >/dev/null 2>&1; then
-    adduser -D -u "$USER_UID" -G "$GROUP_NAME" -h /home/claude -s /bin/sh claude 2>/dev/null || true
+    useradd -m -u "$USER_UID" -g "$GROUP_NAME" -d /home/claude -s /bin/bash claude 2>/dev/null || true
     USER_NAME="claude"
 else
     USER_NAME=$(getent passwd "$USER_UID" | cut -d: -f1)
@@ -42,4 +42,4 @@ if [ -d /workspace ]; then
 fi
 
 export SHELL=/bin/bash
-exec su-exec "${USER_NAME}" "$@"
+exec gosu "${USER_NAME}" "$@"

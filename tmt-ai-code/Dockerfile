@@ -1,12 +1,30 @@
 # Local build of the Claude Code container.
-# Mirrors the upstream nezhar/claude-container image so you can audit/modify it.
-FROM node:22-alpine
+# Based on the official Playwright image (Ubuntu noble) so Chromium,
+# Firefox and WebKit + their system deps are preinstalled in
+# /ms-playwright (PLAYWRIGHT_BROWSERS_PATH is set by the base image).
+#
+# Pin must match the `playwright` npm version projects use, or the
+# bundled browsers won't match the test runner. Bump both together.
+FROM mcr.microsoft.com/playwright:v1.61.1-noble
 
-# git: most projects need it. su-exec: drop privileges to USER_UID. bash: required shell.
-# curl/jq/openssl/make/ripgrep/sqlite/zip/xz: common agent reach-fors.
-RUN apk add --no-cache \
-    git su-exec bash docker-cli tmux \
-    curl jq openssl make ripgrep sqlite zip xz
+# gosu: drop privileges to USER_UID (replaces alpine's su-exec).
+# git: most projects need it. bash already ships on Debian.
+# curl/jq/openssl/make/ripgrep/sqlite3/zip/xz: common agent reach-fors.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git gosu tmux \
+    curl jq openssl make ripgrep sqlite3 zip xz-utils \
+    ca-certificates gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI only (talks to the socket proxy; no daemon in this container).
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+       -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends docker-ce-cli \
+    && rm -rf /var/lib/apt/lists/*
 
 # Pin to the 2.1.x line that matches this compose setup.
 RUN npm install -g @anthropic-ai/claude-code@~2.1.0

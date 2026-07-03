@@ -121,8 +121,9 @@
     ],
     "defaultMode": "bypassPermissions"
   },
-  "model": "opus",
+  "model": "claude-fable-5[1m]",
   "effortLevel": "xhigh",
+  "tui": "default",
   "skipDangerousModePermissionPrompt": true,
   "theme": "light",
   "remoteControlAtStartup": false,
