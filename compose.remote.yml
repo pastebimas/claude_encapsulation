@@ -1,0 +1,64 @@
+# Server-only overlay. Layer over compose.yml on a remote box to expose a
+# browser terminal that drops into a shared tmux session inside tmt-ai-code.
+#
+# Auth model — three layers, no public port:
+#   1. Tailscale sidecar (tmt-ai-tailscale) joins your tailnet. tmt-ai-term
+#      shares its network namespace, so ttyd is reachable ONLY from your
+#      tailnet — nothing is published on the host.
+#   2. Tailscale serve terminates HTTPS with a real Let's Encrypt cert under
+#      `<TS_HOSTNAME>.<tailnet>.ts.net` (see tmt-ai-term/tailscale-serve.json).
+#   3. ttyd basic auth (TTYD_CREDENTIAL) as a per-request second factor.
+#
+# One-time setup on the server:
+#   1. Generate a reusable auth key:
+#        https://login.tailscale.com/admin/settings/keys
+#      (Reusable + ephemeral=false so state persists across restarts.)
+#   2. export TS_AUTHKEY='tskey-auth-...'
+#      export TTYD_CREDENTIAL='you:'"$(openssl rand -base64 24)"
+#      export USER_UID=$(id -u) USER_GID=$(id -g)
+#   3. docker compose -f compose.yml -f compose.remote.yml up -d --build
+#   4. Find the URL:
+#        docker exec tmt-ai-tailscale tailscale status --self
+#      Open https://<TS_HOSTNAME>.<tailnet>.ts.net/ from any tailnet device.
+
+services:
+  tmt-ai-tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tmt-ai-tailscale
+    hostname: tmt-ai
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?put a reusable Tailscale auth key in your shell env}
+      TS_HOSTNAME: ${TS_HOSTNAME:-tmt-ai}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_EXTRA_ARGS: --accept-dns=false
+    volumes:
+      - ./tailscale-state:/var/lib/tailscale
+      - ./tmt-ai-term/tailscale-serve.json:/config/serve.json:ro
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+
+  tmt-ai-term:
+    build:
+      context: ./tmt-ai-term
+    container_name: tmt-ai-term
+    # Share the tailscale container's netns: ttyd is reachable only via the
+    # sidecar's tailnet IP. No `ports:` here — that would conflict with the
+    # shared namespace and would defeat the whole isolation model.
+    network_mode: "service:tmt-ai-tailscale"
+    environment:
+      TTYD_CREDENTIAL: ${TTYD_CREDENTIAL:?set TTYD_CREDENTIAL=user:password before bringing this up}
+      DOCKER_HOST: tcp://tmt-ai-docker-proxy:2375
+      TARGET_CONTAINER: tmt-ai-code
+      TARGET_WORKDIR: /workspace
+      USER_UID: ${USER_UID:-1000}
+      USER_GID: ${USER_GID:-1000}
+      TMUX_SESSION: tmt
+    depends_on:
+      - tmt-ai-tailscale
+      - tmt-ai-code
+      - tmt-ai-docker-proxy
+    restart: unless-stopped

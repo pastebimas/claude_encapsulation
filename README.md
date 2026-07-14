@@ -43,9 +43,16 @@ tmt_ai -l               # list mounted projects
 tmt_ai -h               # help
 ```
 
-Logs: <http://localhost:8001> (bound to 127.0.0.1 only). Each project
-gets its own DB in the sidebar. Datasette only scans `*.db` files at
-startup — restart it after creating logs for a brand-new project:
+Dashboard: <http://localhost:8034> — formatted request/response viewer
+with search, filters, read/unread tracking, delete, per-project docker
+status, CLAUDE.md/context viewer and per-project tasks (stored in the
+project DB, linked to the requests logged while a task is active, with
+comments per task).
+
+Raw SQL: <http://localhost:8001> (Datasette, bound to 127.0.0.1 only).
+Each project gets its own DB in the sidebar. Datasette only scans
+`*.db` files at startup — restart it after creating logs for a
+brand-new project:
 
 ```bash
 docker compose restart tmt-ai-datasette
@@ -69,10 +76,11 @@ segment (`new-thing`) becomes the DB filename.
 
 | Path | Purpose |
 | --- | --- |
-| `compose.yml` | three services: `tmt-ai-proxy`, `tmt-ai-datasette`, `tmt-ai-code` |
+| `compose.yml` | services: `tmt-ai-proxy`, `tmt-ai-viewer`, `tmt-ai-datasette`, `tmt-ai-code`, `tmt-ai-docker-proxy` |
 | `compose.override.yml` | **your** project mounts (gitignored) |
 | `tmt-ai-code/` | Claude CLI container image |
 | `tmt-ai-proxy/` | Anthropic API logger; SQLite migrations in `migrations/` |
+| `tmt-ai-viewer/` | web dashboard (viewer, tasks; read/unread state in `data/.viewer-state.db`) |
 | `tmt-ai-datasette/` | Datasette UI |
 | `claude-config/` | Claude credentials, settings, container-side `CLAUDE.md` (gitignored) |
 | `data/` | one `<project>.db` per mapped project (gitignored) |

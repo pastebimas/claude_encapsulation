@@ -1,7 +1,7 @@
 # Project notes for future Claude sessions
 
 This file is auto-loaded when Claude Code runs from anywhere inside
-`/Users/tautvis/Documents/Webs/a_claude_tmt/`. Read the README first
+`/Users/tautvis/Documents/Webs/atmt_ai/`. Read the README first
 for the user-facing story; this file captures the non-obvious bits.
 
 ## What this repo is (one paragraph)

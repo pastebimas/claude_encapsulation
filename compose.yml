@@ -27,6 +27,23 @@ services:
       - tmt-ai-proxy
     restart: unless-stopped
 
+  tmt-ai-viewer:
+    build:
+      context: ./tmt-ai-viewer
+    container_name: tmt-ai-viewer
+    ports:
+      - "127.0.0.1:8034:8034"
+    volumes:
+      - ./data:/data
+    environment:
+      DOCKER_API: http://tmt-ai-docker-proxy:2375
+      VIEWER_PASSWORD: ${VIEWER_PASSWORD:-}
+      VIEWER_MAX_ATTEMPTS: ${VIEWER_MAX_ATTEMPTS:-5}
+      VIEWER_LOCKOUT_SECONDS: ${VIEWER_LOCKOUT_SECONDS:-300}
+    depends_on:
+      - tmt-ai-docker-proxy
+    restart: unless-stopped
+
   # allows docker commands to be run from within the container.
   # Disable if you dont neet it as it could become a security risk.'
   tmt-ai-docker-proxy:

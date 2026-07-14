@@ -20,3 +20,7 @@
 - **No proactive doc/CLAUDE.md/memory writes after a fix.** State the fix in chat. Persist only when asked.
 - **One-sentence end-of-turn summary, max.** No bulleted recap.
 - **No multi-line comments in config files** (compose.yml, json, etc.) explaining a value.
+
+## Task tracking (tmt-ai dashboard)
+
+Whenever the user asks you to "make tasks", plan work, review-and-list improvements, or produce action items, record each item with your **TaskCreate** tool and keep statuses current with **TaskUpdate** as you work — the tmt-ai proxy extracts these tool calls into the dashboard automatically. Tasks written only into a markdown file are invisible to the dashboard; if the user also wants a file, do both.

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tmt-ai viewer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <h1>tmt-ai</h1>
+    <div id="sidebar-actions">
+      <button id="btn-theme" class="btn" title="light / dark mode">☀️</button>
+      <button id="btn-read-all" class="btn" title="mark every request in every project as read">Read all</button>
+      <button id="btn-logout" class="btn" title="log out of the viewer">Logout</button>
+    </div>
+    <div id="runs-global" hidden>
+      <div class="rg-title">Running</div>
+      <div id="runs-global-list"></div>
+    </div>
+    <nav id="project-list"></nav>
+  </aside>
+
+  <main id="main">
+    <div id="usage-bar" hidden>
+      <span class="ub-label">tokens last 5 min</span>
+      <span id="ub-total"></span>
+      <span id="ub-top"></span>
+    </div>
+    <div id="empty-state">Select a project</div>
+
+    <div id="project-view" hidden>
+      <header id="project-header">
+        <div class="ph-left">
+          <h2 id="project-title"></h2>
+          <div id="status-chips" title="docker containers for this project"></div>
+        </div>
+        <div class="ph-right">
+          <button id="btn-tasks" class="btn">Tasks</button>
+          <button id="btn-context" class="btn">CLAUDE.md / context</button>
+          <button id="btn-mark-all" class="btn">Mark all read</button>
+          <button id="btn-refresh" class="btn">Refresh</button>
+        </div>
+      </header>
+
+      <div id="filters">
+        <input id="f-search" type="search" placeholder="Search request/response bodies…">
+        <select id="f-model"><option value="">All models</option></select>
+        <select id="f-status">
+          <option value="">Any status</option>
+          <option value="2xx">2xx</option>
+          <option value="4xx">4xx</option>
+          <option value="5xx">5xx</option>
+        </select>
+        <label class="chk"><input id="f-unread" type="checkbox"> Unread only</label>
+        <label class="chk" title="one row per claude session instead of one per API request"><input id="f-group" type="checkbox" checked> Group by session</label>
+        <span id="result-count"></span>
+      </div>
+
+      <div id="composer">
+        <textarea id="c-prompt" rows="2" placeholder="Ask Claude to do something in this project… (runs `claude -p` inside tmt-ai-code)"></textarea>
+        <div class="c-row">
+          <select id="c-task" title="run for a task: sets it to doing, links its requests and logs the result as comments"><option value="">no task</option></select>
+          <label class="chk"><input id="c-continue" type="checkbox" title="claude --continue"> continue last session</label>
+          <button id="c-run" class="btn">▶ Run</button>
+          <span id="c-status"></span>
+        </div>
+        <div id="runs-strip"></div>
+      </div>
+
+      <div id="content">
+        <section id="request-list-pane">
+          <div id="request-list"></div>
+          <button id="btn-more" class="btn wide" hidden>Load more</button>
+        </section>
+
+        <section id="detail-pane">
+          <div id="detail-empty">Select a request</div>
+          <div id="detail" hidden>
+            <header id="detail-header">
+              <div id="detail-meta"></div>
+              <div class="dh-actions">
+                <select id="link-task" title="link this request to a task">
+                  <option value="">＋ link to task…</option>
+                </select>
+                <button id="btn-toggle-read" class="btn"></button>
+                <button id="btn-delete" class="btn danger">Delete</button>
+              </div>
+            </header>
+            <nav id="detail-tabs">
+              <button data-tab="summary" class="tab active">Summary</button>
+              <button data-tab="conversation" class="tab">Full conversation</button>
+              <button data-tab="request" class="tab">Request JSON</button>
+              <button data-tab="response" class="tab">Response JSON</button>
+              <button data-tab="headers" class="tab">Headers</button>
+            </nav>
+            <div id="detail-body"></div>
+            <div id="followup">
+              <textarea id="followup-input" rows="2" placeholder="Follow up on this conversation…"></textarea>
+              <div class="c-row">
+                <button id="followup-send" class="btn">↩ Send follow-up</button>
+                <span id="followup-hint"></span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="tasks-panel" hidden>
+      <header>
+        <h3 id="tasks-title">Tasks</h3>
+        <span id="tasks-status"></span>
+        <label class="chk"><input id="tasks-hide-done" type="checkbox"> hide done <span id="tasks-done-count"></span></label>
+        <button id="btn-run-todos" class="btn" title="start one claude run per todo task" hidden>▶ Run all todo</button>
+        <button id="btn-tasks-close" class="btn">✕ Close</button>
+      </header>
+      <div id="tasks-hint">Stored in the project DB. Requests logged while a task is ◐ doing are linked to it automatically; comments feed a future challenger agent.</div>
+      <div id="tasks-layout">
+        <section id="tasks-list-pane">
+          <ul id="tasks-list"></ul>
+          <form id="tasks-add-form">
+            <input id="tasks-add-input" type="text" placeholder="Add a task…" autocomplete="off">
+            <button type="submit" class="btn">Add</button>
+          </form>
+        </section>
+        <section id="task-detail-pane">
+          <div id="task-detail-empty">Select a task</div>
+          <div id="task-detail" hidden>
+            <textarea id="task-desc" rows="3" placeholder="Description…"></textarea>
+            <h4>Requests <span id="task-req-count"></span></h4>
+            <div id="task-requests"></div>
+            <h4>Comments</h4>
+            <ul id="task-comments"></ul>
+            <form id="task-comment-form">
+              <input id="task-comment-input" type="text" placeholder="Add a comment…" autocomplete="off">
+              <button type="submit" class="btn">Comment</button>
+            </form>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div id="context-panel" hidden>
+      <header>
+        <h3 id="context-title">Project context</h3>
+        <button id="btn-context-close" class="btn">✕ Close</button>
+      </header>
+      <nav id="context-tabs"></nav>
+      <pre id="context-content"></pre>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

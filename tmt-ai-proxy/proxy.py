@@ -45,6 +45,8 @@ def redact_headers(headers: dict) -> dict:
         k: ("[REDACTED]" if k.lower() in SENSITIVE_HEADERS else v)
         for k, v in headers.items()
     }
+TASK_STATUS_MAP = {"pending": "todo", "in_progress": "doing", "completed": "done"}
+TASK_ID_RE = re.compile(r"Task #(\d+)")
 CWD_PATTERNS = [
     # Match the project root literally, then capture the first segment.
     re.compile(
@@ -113,10 +115,11 @@ def compact_streaming_response(raw_body: str) -> str:
     if not raw_body or not raw_body.strip().startswith("event:"):
         return raw_body
 
-    chunks = []
-    content_parts = []
+    chunk_count = 0
+    blocks = {}  # index -> {"block": start block, "text": [], "json": []}
     metadata = {}
     usage = {}
+    stream_error = None
 
     for line in raw_body.split("\n"):
         line = line.strip()
@@ -131,9 +134,10 @@ def compact_streaming_response(raw_body: str) -> str:
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
             continue
-        chunks.append(chunk)
+        chunk_count += 1
+        ctype = chunk.get("type")
 
-        if not metadata and chunk.get("type") == "message_start":
+        if not metadata and ctype == "message_start":
             msg = chunk.get("message", {})
             metadata = {
                 "id": msg.get("id"),
@@ -146,32 +150,73 @@ def compact_streaming_response(raw_body: str) -> str:
             if msg.get("usage"):
                 usage = msg.get("usage", {})
 
-        if chunk.get("type") == "content_block_delta":
-            delta = chunk.get("delta", {})
-            if delta.get("type") == "text_delta":
-                content_parts.append(delta.get("text", ""))
-            elif delta.get("type") == "thinking_delta":
-                content_parts.append(delta.get("thinking", ""))
+        if ctype == "error":
+            stream_error = chunk.get("error") or {"type": "unknown", "message": ""}
 
-        if chunk.get("type") == "message_delta":
+        if ctype == "content_block_start":
+            idx = chunk.get("index", len(blocks))
+            blocks[idx] = {
+                "block": dict(chunk.get("content_block") or {}),
+                "text": [],
+                "json": [],
+            }
+
+        if ctype == "content_block_delta":
+            idx = chunk.get("index", 0)
+            entry = blocks.setdefault(idx, {"block": {}, "text": [], "json": []})
+            delta = chunk.get("delta", {})
+            dtype = delta.get("type")
+            if dtype == "text_delta":
+                entry["text"].append(delta.get("text", ""))
+            elif dtype == "thinking_delta":
+                entry["text"].append(delta.get("thinking", ""))
+            elif dtype == "input_json_delta":
+                entry["json"].append(delta.get("partial_json", ""))
+
+        if ctype == "message_delta":
             delta = chunk.get("delta", {})
             if delta.get("stop_reason"):
                 metadata["stop_reason"] = delta.get("stop_reason")
             if chunk.get("usage"):
                 usage.update(chunk.get("usage", {}))
 
-    if not chunks:
+    if not chunk_count:
         return raw_body
+
+    content = []
+    for idx in sorted(blocks):
+        entry = blocks[idx]
+        block = entry["block"]
+        btype = block.get("type") or ("thinking" if entry["text"] else "text")
+        joined = "".join(entry["text"])
+        if btype == "thinking":
+            block["thinking"] = joined
+            block.pop("signature", None)
+        elif btype == "text":
+            block["text"] = joined
+        elif btype == "tool_use":
+            raw_input = "".join(entry["json"])
+            try:
+                block["input"] = json.loads(raw_input) if raw_input else {}
+            except json.JSONDecodeError:
+                block["input_json"] = raw_input
+        content.append(block)
+    if not content:
+        content = [{"type": "text", "text": ""}]
 
     compacted = {
         **metadata,
-        "content": [{"type": "text", "text": "".join(content_parts)}],
+        "content": content,
         "usage": usage,
         "_compacted": {
-            "original_chunks": len(chunks),
+            "original_chunks": chunk_count,
             "compacted_at": datetime.utcnow().isoformat(),
         },
     }
+    if stream_error:
+        compacted["error"] = stream_error
+        if not metadata:
+            compacted["type"] = "error"
     return json.dumps(compacted)
 
 
@@ -256,6 +301,7 @@ class ProjectLogger:
         response_headers: dict,
         response_body: Optional[str],
         duration_ms: int,
+        session_id: Optional[str] = None,
     ):
         await self.ensure_initialized(project)
 
@@ -273,12 +319,12 @@ class ProjectLogger:
         db_path = self.db_path_for(project)
         try:
             async with aiosqlite.connect(db_path) as db:
-                await db.execute(
+                cursor = await db.execute(
                     """
                     INSERT INTO request_logs
                     (timestamp, method, path, target_url, request_headers, request_body,
-                     response_status, response_headers, response_body, duration_ms)
-                    VALUES (?, ?, ?, ?, json(?), json(?), ?, json(?), ?, ?)
+                     response_status, response_headers, response_body, duration_ms, session_id)
+                    VALUES (?, ?, ?, ?, json(?), json(?), ?, json(?), ?, ?, ?)
                     """,
                     (
                         timestamp,
@@ -291,12 +337,151 @@ class ProjectLogger:
                         response_headers_json,
                         response_body,
                         duration_ms,
+                        session_id,
                     ),
                 )
+                log_id = cursor.lastrowid
+                # Only auto-link when exactly one task is 'doing' — with
+                # parallel runs the heuristic would mislink; precise links
+                # come from session-based linking in the viewer.
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO task_requests (task_id, request_log_id, linked_by)
+                    SELECT id, ?, 'auto' FROM tasks
+                    WHERE status = 'doing'
+                      AND (SELECT COUNT(*) FROM tasks WHERE status = 'doing') = 1
+                    """,
+                    (log_id,),
+                )
+                try:
+                    await self._sync_agent_tasks(db, session_id, log_id, request_body_json)
+                except Exception as e:
+                    print(f"  ! agent task sync failed for '{project}': {e}")
                 await db.commit()
         except Exception as e:
             print(f"✗ Failed to write log for project '{project}' ({db_path}): {e}")
             raise
+
+    async def _sync_agent_tasks(self, db, session_id, request_log_id, request_body_json):
+        """Mirror Claude's TaskCreate/TaskUpdate tool calls into the tasks table.
+
+        Streamed responses are compacted to text-only (tool_use blocks are
+        dropped), so tool calls are read from the request body, where the
+        conversation echoes them back together with their tool_results.
+        """
+        if not request_body_json:
+            return
+        try:
+            body = json.loads(request_body_json)
+        except (json.JSONDecodeError, TypeError):
+            return
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return
+
+        calls = []
+        results = {}
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("name") in (
+                    "TaskCreate",
+                    "TaskUpdate",
+                ):
+                    calls.append(block)
+                elif block.get("type") == "tool_result":
+                    inner = block.get("content")
+                    if isinstance(inner, list):
+                        inner = " ".join(
+                            c.get("text", "") for c in inner if isinstance(c, dict)
+                        )
+                    if isinstance(inner, str):
+                        results[block.get("tool_use_id")] = inner
+
+        for block in calls:
+            tool_use_id = block.get("id")
+            if not tool_use_id:
+                continue
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO agent_tool_calls (tool_use_id) VALUES (?)",
+                (tool_use_id,),
+            )
+            if cur.rowcount == 0:
+                continue
+            inp = block.get("input") or {}
+            if block.get("name") == "TaskCreate":
+                title = str(inp.get("subject") or "").strip()
+                if not title:
+                    continue
+                cur = await db.execute(
+                    "INSERT INTO tasks (title, description, origin) VALUES (?, ?, 'agent')",
+                    (title, str(inp.get("description") or "")),
+                )
+                task_id = cur.lastrowid
+                await db.execute(
+                    "UPDATE agent_tool_calls SET task_id = ? WHERE tool_use_id = ?",
+                    (task_id, tool_use_id),
+                )
+                match = TASK_ID_RE.search(results.get(tool_use_id) or "")
+                if session_id and match:
+                    await db.execute(
+                        "INSERT OR IGNORE INTO session_task_map"
+                        " (session_id, claude_task_id, task_id) VALUES (?, ?, ?)",
+                        (session_id, match.group(1), task_id),
+                    )
+                await db.execute(
+                    "INSERT OR IGNORE INTO task_requests"
+                    " (task_id, request_log_id, linked_by) VALUES (?, ?, 'agent')",
+                    (task_id, request_log_id),
+                )
+            else:
+                claude_id = str(inp.get("taskId") or "")
+                if not (session_id and claude_id):
+                    continue
+                cur = await db.execute(
+                    "SELECT task_id FROM session_task_map"
+                    " WHERE session_id = ? AND claude_task_id = ?",
+                    (session_id, claude_id),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    continue
+                task_id = row[0]
+                if inp.get("status") == "deleted":
+                    await db.execute(
+                        "DELETE FROM task_comments WHERE task_id = ?", (task_id,)
+                    )
+                    await db.execute(
+                        "DELETE FROM task_requests WHERE task_id = ?", (task_id,)
+                    )
+                    await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+                    continue
+                sets, args = [], []
+                status = TASK_STATUS_MAP.get(inp.get("status"))
+                if status:
+                    sets.append("status = ?")
+                    args.append(status)
+                if isinstance(inp.get("subject"), str) and inp["subject"].strip():
+                    sets.append("title = ?")
+                    args.append(inp["subject"].strip())
+                if isinstance(inp.get("description"), str):
+                    sets.append("description = ?")
+                    args.append(inp["description"])
+                if sets:
+                    sets.append("updated_at = ?")
+                    args += [datetime.utcnow().isoformat(), task_id]
+                    await db.execute(
+                        f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", args
+                    )
+                await db.execute(
+                    "INSERT OR IGNORE INTO task_requests"
+                    " (task_id, request_log_id, linked_by) VALUES (?, ?, 'agent')",
+                    (task_id, request_log_id),
+                )
 
 
 async def proxy_handler(request: web.Request) -> web.Response:
@@ -315,6 +500,7 @@ async def proxy_handler(request: web.Request) -> web.Response:
     }
 
     project = extract_project_name(request_body)
+    session_id = request.headers.get("x-claude-code-session-id")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -364,6 +550,7 @@ async def proxy_handler(request: web.Request) -> web.Response:
                     response_headers=redact_headers(response_headers),
                     response_body=response_body_text,
                     duration_ms=duration_ms,
+                    session_id=session_id,
                 )
 
                 print(
