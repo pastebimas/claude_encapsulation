@@ -36,7 +36,7 @@
           <div id="status-chips" title="docker containers for this project"></div>
         </div>
         <div class="ph-right">
-          <button id="btn-tasks" class="btn">Tasks</button>
+          <button id="btn-notes" class="btn">Notes</button>
           <button id="btn-context" class="btn">CLAUDE.md / context</button>
           <button id="btn-mark-all" class="btn">Mark all read</button>
           <button id="btn-refresh" class="btn">Refresh</button>
@@ -60,7 +60,6 @@
       <div id="composer">
         <textarea id="c-prompt" rows="2" placeholder="Ask Claude to do something in this project… (runs `claude -p` inside tmt-ai-code)"></textarea>
         <div class="c-row">
-          <select id="c-task" title="run for a task: sets it to doing, links its requests and logs the result as comments"><option value="">no task</option></select>
           <label class="chk"><input id="c-continue" type="checkbox" title="claude --continue"> continue last session</label>
           <button id="c-run" class="btn">▶ Run</button>
           <span id="c-status"></span>
@@ -80,9 +79,6 @@
             <header id="detail-header">
               <div id="detail-meta"></div>
               <div class="dh-actions">
-                <select id="link-task" title="link this request to a task">
-                  <option value="">＋ link to task…</option>
-                </select>
                 <button id="btn-toggle-read" class="btn"></button>
                 <button id="btn-delete" class="btn danger">Delete</button>
               </div>
@@ -107,35 +103,33 @@
       </div>
     </div>
 
-    <div id="tasks-panel" hidden>
+    <div id="notes-panel" hidden>
       <header>
-        <h3 id="tasks-title">Tasks</h3>
-        <span id="tasks-status"></span>
-        <label class="chk"><input id="tasks-hide-done" type="checkbox"> hide done <span id="tasks-done-count"></span></label>
-        <button id="btn-run-todos" class="btn" title="start one claude run per todo task" hidden>▶ Run all todo</button>
-        <button id="btn-tasks-close" class="btn">✕ Close</button>
+        <h3 id="notes-title">Notes</h3>
+        <span id="notes-status"></span>
+        <button id="btn-notes-close" class="btn">✕ Close</button>
       </header>
-      <div id="tasks-hint">Stored in the project DB. Requests logged while a task is ◐ doing are linked to it automatically; comments feed a future challenger agent.</div>
-      <div id="tasks-layout">
-        <section id="tasks-list-pane">
-          <ul id="tasks-list"></ul>
-          <form id="tasks-add-form">
-            <input id="tasks-add-input" type="text" placeholder="Add a task…" autocomplete="off">
+      <div id="notes-hint">Things worth returning to later. Dashboard runs save the agent's trailing “NOTES:” section here automatically. Checklist lines (<code>- [ ]</code>) can be marked todo / in&nbsp;progress / done, or dispatched each as its own claude run.</div>
+      <div id="notes-layout">
+        <section id="notes-list-pane">
+          <ul id="notes-list"></ul>
+          <form id="notes-add-form">
+            <input id="notes-add-input" type="text" placeholder="Add a note…" autocomplete="off">
             <button type="submit" class="btn">Add</button>
           </form>
         </section>
-        <section id="task-detail-pane">
-          <div id="task-detail-empty">Select a task</div>
-          <div id="task-detail" hidden>
-            <textarea id="task-desc" rows="3" placeholder="Description…"></textarea>
-            <h4>Requests <span id="task-req-count"></span></h4>
-            <div id="task-requests"></div>
-            <h4>Comments</h4>
-            <ul id="task-comments"></ul>
-            <form id="task-comment-form">
-              <input id="task-comment-input" type="text" placeholder="Add a comment…" autocomplete="off">
-              <button type="submit" class="btn">Comment</button>
-            </form>
+        <section id="note-detail-pane">
+          <div id="note-detail-empty">Select a note</div>
+          <div id="note-detail" hidden>
+            <div class="n-row">
+              <input id="note-title" type="text" placeholder="Title…">
+              <button id="note-run-all" class="btn" title="one claude run per open checklist line" hidden>▶ Run all open</button>
+              <button id="note-edit" class="btn">✎ Edit</button>
+              <button id="note-delete" class="btn danger">✕</button>
+            </div>
+            <div id="note-body-view"></div>
+            <textarea id="note-body" rows="14" placeholder="Write anything; '- [ ] item' lines become a checklist…" hidden></textarea>
+            <div id="note-meta"></div>
           </div>
         </section>
       </div>

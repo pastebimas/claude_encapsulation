@@ -106,3 +106,19 @@ container, a better default in `settings.json`, a cleaner launcher
 flag, a useful query you'd want as a Datasette canned view — open a PR.
 Keep changes focused; new features should explain the
 problem they solve in the PR description.
+
+
+● Done. Wrote /workspace/pram-fe/nuxt-plan.md.
+
+I had no chat history to recall, so I reconstructed the plan from the actual state on disk —
+the untracked nuxt/ app plus its existing nuxt/docs/ (migration-status, architecture,
+decisions, 4 audits) and nuxt/commit.md. The new file is a self-contained handoff: what the
+project is, phase-by-phase status, everything done (scaffold, SCSS, data/auth proxy layer,
+homepage, SEO/a11y/perf infra, the 2026-08-14 bug fixes), everything left (remaining public
+pages, /ucp user panel, image pipeline, per-page SEO, register/social auth routes,
+slugs/i18n), plus how to run/verify, BE reachability caveats, committing, and a key-paths map.
+
+A fresh agent should start by reading nuxt-plan.md, then nuxt/docs/migration-status.md for the
+authoritative checklist.
+
+

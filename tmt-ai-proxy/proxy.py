@@ -45,8 +45,6 @@ def redact_headers(headers: dict) -> dict:
         k: ("[REDACTED]" if k.lower() in SENSITIVE_HEADERS else v)
         for k, v in headers.items()
     }
-TASK_STATUS_MAP = {"pending": "todo", "in_progress": "doing", "completed": "done"}
-TASK_ID_RE = re.compile(r"Task #(\d+)")
 CWD_PATTERNS = [
     # Match the project root literally, then capture the first segment.
     re.compile(
@@ -319,7 +317,7 @@ class ProjectLogger:
         db_path = self.db_path_for(project)
         try:
             async with aiosqlite.connect(db_path) as db:
-                cursor = await db.execute(
+                await db.execute(
                     """
                     INSERT INTO request_logs
                     (timestamp, method, path, target_url, request_headers, request_body,
@@ -340,148 +338,10 @@ class ProjectLogger:
                         session_id,
                     ),
                 )
-                log_id = cursor.lastrowid
-                # Only auto-link when exactly one task is 'doing' — with
-                # parallel runs the heuristic would mislink; precise links
-                # come from session-based linking in the viewer.
-                await db.execute(
-                    """
-                    INSERT OR IGNORE INTO task_requests (task_id, request_log_id, linked_by)
-                    SELECT id, ?, 'auto' FROM tasks
-                    WHERE status = 'doing'
-                      AND (SELECT COUNT(*) FROM tasks WHERE status = 'doing') = 1
-                    """,
-                    (log_id,),
-                )
-                try:
-                    await self._sync_agent_tasks(db, session_id, log_id, request_body_json)
-                except Exception as e:
-                    print(f"  ! agent task sync failed for '{project}': {e}")
                 await db.commit()
         except Exception as e:
             print(f"✗ Failed to write log for project '{project}' ({db_path}): {e}")
             raise
-
-    async def _sync_agent_tasks(self, db, session_id, request_log_id, request_body_json):
-        """Mirror Claude's TaskCreate/TaskUpdate tool calls into the tasks table.
-
-        Streamed responses are compacted to text-only (tool_use blocks are
-        dropped), so tool calls are read from the request body, where the
-        conversation echoes them back together with their tool_results.
-        """
-        if not request_body_json:
-            return
-        try:
-            body = json.loads(request_body_json)
-        except (json.JSONDecodeError, TypeError):
-            return
-        messages = body.get("messages")
-        if not isinstance(messages, list):
-            return
-
-        calls = []
-        results = {}
-        for msg in messages:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "tool_use" and block.get("name") in (
-                    "TaskCreate",
-                    "TaskUpdate",
-                ):
-                    calls.append(block)
-                elif block.get("type") == "tool_result":
-                    inner = block.get("content")
-                    if isinstance(inner, list):
-                        inner = " ".join(
-                            c.get("text", "") for c in inner if isinstance(c, dict)
-                        )
-                    if isinstance(inner, str):
-                        results[block.get("tool_use_id")] = inner
-
-        for block in calls:
-            tool_use_id = block.get("id")
-            if not tool_use_id:
-                continue
-            cur = await db.execute(
-                "INSERT OR IGNORE INTO agent_tool_calls (tool_use_id) VALUES (?)",
-                (tool_use_id,),
-            )
-            if cur.rowcount == 0:
-                continue
-            inp = block.get("input") or {}
-            if block.get("name") == "TaskCreate":
-                title = str(inp.get("subject") or "").strip()
-                if not title:
-                    continue
-                cur = await db.execute(
-                    "INSERT INTO tasks (title, description, origin) VALUES (?, ?, 'agent')",
-                    (title, str(inp.get("description") or "")),
-                )
-                task_id = cur.lastrowid
-                await db.execute(
-                    "UPDATE agent_tool_calls SET task_id = ? WHERE tool_use_id = ?",
-                    (task_id, tool_use_id),
-                )
-                match = TASK_ID_RE.search(results.get(tool_use_id) or "")
-                if session_id and match:
-                    await db.execute(
-                        "INSERT OR IGNORE INTO session_task_map"
-                        " (session_id, claude_task_id, task_id) VALUES (?, ?, ?)",
-                        (session_id, match.group(1), task_id),
-                    )
-                await db.execute(
-                    "INSERT OR IGNORE INTO task_requests"
-                    " (task_id, request_log_id, linked_by) VALUES (?, ?, 'agent')",
-                    (task_id, request_log_id),
-                )
-            else:
-                claude_id = str(inp.get("taskId") or "")
-                if not (session_id and claude_id):
-                    continue
-                cur = await db.execute(
-                    "SELECT task_id FROM session_task_map"
-                    " WHERE session_id = ? AND claude_task_id = ?",
-                    (session_id, claude_id),
-                )
-                row = await cur.fetchone()
-                if not row:
-                    continue
-                task_id = row[0]
-                if inp.get("status") == "deleted":
-                    await db.execute(
-                        "DELETE FROM task_comments WHERE task_id = ?", (task_id,)
-                    )
-                    await db.execute(
-                        "DELETE FROM task_requests WHERE task_id = ?", (task_id,)
-                    )
-                    await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-                    continue
-                sets, args = [], []
-                status = TASK_STATUS_MAP.get(inp.get("status"))
-                if status:
-                    sets.append("status = ?")
-                    args.append(status)
-                if isinstance(inp.get("subject"), str) and inp["subject"].strip():
-                    sets.append("title = ?")
-                    args.append(inp["subject"].strip())
-                if isinstance(inp.get("description"), str):
-                    sets.append("description = ?")
-                    args.append(inp["description"])
-                if sets:
-                    sets.append("updated_at = ?")
-                    args += [datetime.utcnow().isoformat(), task_id]
-                    await db.execute(
-                        f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", args
-                    )
-                await db.execute(
-                    "INSERT OR IGNORE INTO task_requests"
-                    " (task_id, request_log_id, linked_by) VALUES (?, ?, 'agent')",
-                    (task_id, request_log_id),
-                )
 
 
 async def proxy_handler(request: web.Request) -> web.Response:

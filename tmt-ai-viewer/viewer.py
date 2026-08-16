@@ -105,7 +105,6 @@ def ensure_state_db():
                 id TEXT PRIMARY KEY,
                 project TEXT NOT NULL,
                 prompt TEXT NOT NULL,
-                task_id INTEGER,
                 session_id TEXT,
                 resume_session_id TEXT,
                 status TEXT NOT NULL DEFAULT 'running',
@@ -397,7 +396,7 @@ def usage_recent(minutes: int = 5) -> dict:
         if not valid_project(name):
             continue
         try:
-            with task_conn(name) as conn:
+            with note_conn(name) as conn:
                 total_row = conn.execute(
                     f"SELECT COUNT(*) AS n, {TOKEN_SUMS} FROM request_logs r"
                     " WHERE r.timestamp >= ?",
@@ -410,13 +409,11 @@ def usage_recent(minutes: int = 5) -> dict:
                     totals[k] += total_row[k] or 0
                 rows = conn.execute(
                     f"""
-                    SELECT tr.task_id AS task_id, t.title AS title,
+                    SELECT r.session_id AS session_id,
                            COUNT(*) AS requests, {TOKEN_SUMS}
                     FROM request_logs r
-                    LEFT JOIN task_requests tr ON tr.request_log_id = r.id
-                    LEFT JOIN tasks t ON t.id = tr.task_id
                     WHERE r.timestamp >= ?
-                    GROUP BY tr.task_id
+                    GROUP BY r.session_id
                     """,
                     (cutoff,),
                 ).fetchall()
@@ -427,8 +424,7 @@ def usage_recent(minutes: int = 5) -> dict:
             entry.update(
                 {
                     "project": name,
-                    "task_id": row["task_id"],
-                    "title": row["title"],
+                    "session_id": row["session_id"],
                     "requests": row["requests"],
                     "tokens": (row["input_tokens"] or 0) + (row["output_tokens"] or 0),
                 }
@@ -553,7 +549,7 @@ def query_requests(project: str, params: dict) -> dict:
 
 
 def get_request_detail(project: str, log_id: int) -> dict | None:
-    with task_conn(project, attach_state=True) as conn:
+    with note_conn(project, attach_state=True) as conn:
         row = conn.execute(
             """
             SELECT r.*, s.read_at
@@ -565,17 +561,7 @@ def get_request_detail(project: str, log_id: int) -> dict | None:
         ).fetchone()
         if row is None:
             return None
-        tasks = conn.execute(
-            """
-            SELECT t.id, t.title, t.status, tr.linked_by
-            FROM task_requests tr JOIN tasks t ON t.id = tr.task_id
-            WHERE tr.request_log_id = ? ORDER BY t.id
-            """,
-            (log_id,),
-        ).fetchall()
-    detail = {key: row[key] for key in row.keys()}
-    detail["tasks"] = [dict(t) for t in tasks]
-    return detail
+    return {key: row[key] for key in row.keys()}
 
 
 def mark_read(project: str, ids: list, read: bool):
@@ -651,10 +637,7 @@ def mark_all_read_everywhere() -> int:
 
 def delete_requests(project: str, ids: list) -> int:
     placeholders = ",".join("?" for _ in ids)
-    with task_conn(project) as conn:
-        conn.execute(
-            f"DELETE FROM task_requests WHERE request_log_id IN ({placeholders})", ids
-        )
+    with note_conn(project) as conn:
         cur = conn.execute(
             f"DELETE FROM request_logs WHERE id IN ({placeholders})", ids
         )
@@ -816,13 +799,21 @@ def project_context(project: str) -> dict:
 RUN_TIMEOUT = int(os.getenv("RUN_TIMEOUT", "3600"))
 RUN_PROMPT_SUFFIX = os.getenv(
     "RUN_PROMPT_SUFFIX",
-    "If you discover separable follow-up work, record it with TaskCreate as todo"
-    " instead of doing it now — tasks are dispatched as separate runs from the"
-    " dashboard. End your final reply with a line 'TASK-STATUS: done' if the"
-    " task is fully complete, or 'TASK-STATUS: blocked' if you had to stop"
-    " without finishing.",
+    "If something extra pops up that is worth returning to later (follow-up"
+    " work, proposals, ideas), do not do it now — end your final reply with a"
+    " 'NOTES:' section listing each item as a '- [ ] item' line; it is saved"
+    " to the project notes.",
 )
-TASK_STATUS_MARKER_RE = re.compile(r"^TASK-STATUS:\s*(done|blocked)\s*$", re.I | re.M)
+RUN_NO_QUESTIONS = os.getenv(
+    "RUN_NO_QUESTIONS",
+    "This task was dispatched from the web dashboard and runs"
+    " non-interactively: no one can see or answer clarifying questions. Do not"
+    " ask any — make the most reasonable assumptions, state them briefly, and"
+    " carry the task through to completion. If a decision is genuinely"
+    " blocking, pick the safest sensible default, note it in your final reply,"
+    " and keep going rather than stopping to ask.",
+)
+NOTES_MARKER_RE = re.compile(r"^NOTES:[ \t]*(.*)", re.I | re.M)
 RUNS: dict = {}
 RUNS_LOCK = threading.Lock()
 
@@ -957,11 +948,11 @@ def save_run(info: dict):
         conn.execute("PRAGMA busy_timeout = 10000")
         conn.execute(
             """
-            INSERT INTO runs (id, project, prompt, task_id, session_id,
+            INSERT INTO runs (id, project, prompt, session_id,
                 resume_session_id, status, exit_code, output, error,
                 error_detail, limit_hit, resume_at, auto_resumed,
                 started_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = excluded.status,
@@ -977,7 +968,6 @@ def save_run(info: dict):
                 info["id"],
                 info["project"],
                 info["prompt"],
-                info["task_id"],
                 info.get("session_id"),
                 info.get("resume_session_id"),
                 info.get("status", "running"),
@@ -1006,7 +996,6 @@ def mark_stale_runs():
 def start_run(
     project: str,
     prompt: str,
-    task_id,
     continue_session: bool,
     resume_session_id: str | None = None,
 ) -> str:
@@ -1015,7 +1004,6 @@ def start_run(
         "id": run_id,
         "project": project,
         "prompt": prompt,
-        "task_id": task_id,
         "session_id": None,
         "resume_session_id": resume_session_id,
         "status": "running",
@@ -1062,26 +1050,10 @@ def parse_claude_json(out: str) -> dict | None:
     return None
 
 
-def link_session_requests(project: str, task_id: int, session_id: str):
-    try:
-        with task_conn(project) as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO task_requests (task_id, request_log_id, linked_by)"
-                " SELECT ?, id, 'session' FROM request_logs WHERE session_id = ?",
-                (task_id, session_id),
-            )
-            conn.commit()
-    except sqlite3.OperationalError:
-        pass  # request_logs.session_id column not migrated yet
-
-
 def _run_worker(info: dict, continue_session: bool):
-    project, prompt, task_id = info["project"], info["prompt"], info["task_id"]
+    project, prompt = info["project"], info["prompt"]
     resume_session_id = info.get("resume_session_id")
     try:
-        if task_id:
-            update_task(project, task_id, {"status": "doing"})
-            add_task_comment(project, task_id, f"▶ {prompt}", "user")
         cmd = ["claude", "-p", "--output-format", "json"]
         run_prompt = prompt
         if resume_session_id:
@@ -1090,8 +1062,10 @@ def _run_worker(info: dict, continue_session: bool):
             cmd.append("--continue")
         elif RUN_PROMPT_SUFFIX:
             run_prompt = f"{prompt}\n\n{RUN_PROMPT_SUFFIX}"
+        if RUN_NO_QUESTIONS:
+            run_prompt = f"{RUN_NO_QUESTIONS}\n\n{run_prompt}"
         cmd.append(run_prompt)
-        log_run(info["id"], f"start project={project} task={task_id}")
+        log_run(info["id"], f"start project={project}")
         out, err, exit_code, stream_note = docker_exec_run(
             cmd, f"/workspace/{project}", timeout=RUN_TIMEOUT, run_id=info["id"]
         )
@@ -1124,12 +1098,19 @@ def _run_worker(info: dict, continue_session: bool):
             info["error_detail"] = (
                 (info.get("error_detail") or "") + "\n── stderr ──\n" + err.strip()
             ).strip()[:8000]
-        if task_id:
-            add_task_comment(
-                project, task_id, info["output"][:4000] or "(no output)", "agent"
-            )
-            if info.get("session_id"):
-                link_session_requests(project, task_id, info["session_id"])
+        if not info["error"]:
+            marker = NOTES_MARKER_RE.search(info["output"] or "")
+            if marker:
+                section = (marker.group(1) + info["output"][marker.end():]).strip()
+                if section:
+                    create_note(
+                        project,
+                        squash(prompt, 60),
+                        section,
+                        origin="agent",
+                        session_id=info.get("session_id"),
+                    )
+                    log_run(info["id"], "saved NOTES section to project notes")
     except Exception as e:
         import traceback
 
@@ -1141,18 +1122,6 @@ def _run_worker(info: dict, continue_session: bool):
         info["running"] = False
         info["status"] = "error" if info.get("error") else "done"
         info["finished_at"] = utcnow()
-        if task_id:
-            try:
-                if info["status"] == "done":
-                    marker = TASK_STATUS_MARKER_RE.search(info.get("output") or "")
-                    blocked = marker and marker.group(1).lower() == "blocked"
-                    update_task(
-                        project, task_id, {"status": "todo" if blocked else "done"}
-                    )
-                else:
-                    update_task(project, task_id, {"status": "todo"})
-            except Exception as e:
-                log_run(info["id"], f"WARNING task status update failed: {e}")
         if info["status"] == "error":
             detect_limit(info)
             log_run(
@@ -1168,7 +1137,7 @@ def _run_worker(info: dict, continue_session: bool):
 
 
 RUN_LIST_FIELDS = (
-    "id", "project", "task_id", "session_id", "resume_session_id",
+    "id", "project", "session_id", "resume_session_id",
     "status", "exit_code", "started_at", "finished_at",
     "limit_hit", "resume_at", "auto_resumed",
 )
@@ -1253,9 +1222,7 @@ def resume_run(run: dict, reason: str) -> str | None:
         )
     else:
         prompt = run.get("prompt") or ""
-    new_id = start_run(
-        run["project"], prompt, run.get("task_id"), False, session_id
-    )
+    new_id = start_run(run["project"], prompt, False, session_id)
     log_run(
         run["id"],
         f"resumed as run {new_id} ({reason}; "
@@ -1287,172 +1254,75 @@ def _resume_scheduler():
             traceback.print_exc()
 
 
-# -- tasks (per-project DB: tasks / task_requests / task_comments) ----------
-# Schema matches tmt-ai-proxy/migrations/004_tasks.sql; the DDL is repeated
+# -- notes (per-project DB) --------------------------------------------------
+# Schema matches tmt-ai-proxy/migrations/007_notes.sql; the DDL is repeated
 # here so the viewer works on DBs the proxy hasn't migrated yet.
 
-TASK_STATUSES = ("todo", "doing", "done")
-TASK_DDL = """
-CREATE TABLE IF NOT EXISTS tasks (
+NOTES_DDL = """
+CREATE TABLE IF NOT EXISTS notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'doing', 'done')),
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL DEFAULT 'user',
+    session_id TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
 );
-CREATE TABLE IF NOT EXISTS task_requests (
-    task_id INTEGER NOT NULL REFERENCES tasks(id),
-    request_log_id INTEGER NOT NULL REFERENCES request_logs(id),
-    linked_by TEXT NOT NULL DEFAULT 'auto',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now')),
-    PRIMARY KEY (task_id, request_log_id)
-);
-CREATE TABLE IF NOT EXISTS task_comments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id INTEGER NOT NULL REFERENCES tasks(id),
-    author TEXT NOT NULL DEFAULT 'user',
-    body TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
-);
-CREATE INDEX IF NOT EXISTS idx_task_requests_request ON task_requests(request_log_id);
-CREATE INDEX IF NOT EXISTS idx_task_comments_task    ON task_comments(task_id);
 """
 
 
-def task_conn(project: str, attach_state: bool = False) -> sqlite3.Connection:
+def note_conn(project: str, attach_state: bool = False) -> sqlite3.Connection:
     conn = connect(DATA_DIR / f"{project}.db", attach_state=attach_state)
-    conn.executescript(TASK_DDL)
+    conn.executescript(NOTES_DDL)
     return conn
 
 
-def list_tasks(project: str) -> dict:
-    with task_conn(project) as conn:
-        rows = conn.execute(
-            f"""
-            SELECT t.*,
-                   (SELECT COUNT(*) FROM task_requests r WHERE r.task_id = t.id) AS request_count,
-                   (SELECT COUNT(*) FROM task_comments c WHERE c.task_id = t.id) AS comment_count,
-                   {", ".join(f"COALESCE(u.{k}, 0) AS {k}" for k in TOKEN_KEYS)}
-            FROM tasks t
-            LEFT JOIN (
-                SELECT tr.task_id, {TOKEN_SUMS}
-                FROM task_requests tr
-                JOIN request_logs r ON r.id = tr.request_log_id
-                GROUP BY tr.task_id
-            ) u ON u.task_id = t.id
-            ORDER BY CASE t.status WHEN 'doing' THEN 0 WHEN 'todo' THEN 1 ELSE 2 END,
-                     t.id DESC
-            """
-        ).fetchall()
-    return {"tasks": [dict(r) for r in rows]}
+def list_notes(project: str) -> dict:
+    with note_conn(project) as conn:
+        rows = conn.execute("SELECT * FROM notes ORDER BY id DESC").fetchall()
+    return {"notes": [dict(r) for r in rows]}
 
 
-def create_task(project: str, title: str, description: str) -> dict:
-    with task_conn(project) as conn:
+def create_note(
+    project: str,
+    title: str,
+    body: str,
+    origin: str = "user",
+    session_id: str | None = None,
+) -> dict:
+    with note_conn(project) as conn:
         cur = conn.execute(
-            "INSERT INTO tasks (title, description) VALUES (?, ?)",
-            (title, description),
+            "INSERT INTO notes (title, body, origin, session_id) VALUES (?, ?, ?, ?)",
+            (title, body, origin, session_id),
         )
         conn.commit()
-        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return {"ok": True, "task": dict(row)}
+        row = conn.execute("SELECT * FROM notes WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return {"ok": True, "note": dict(row)}
 
 
-def update_task(project: str, task_id: int, fields: dict) -> dict:
+def update_note(project: str, note_id: int, fields: dict) -> dict:
     sets, args = [], []
-    if isinstance(fields.get("title"), str) and fields["title"].strip():
+    if isinstance(fields.get("title"), str):
         sets.append("title = ?")
         args.append(fields["title"].strip())
-    if isinstance(fields.get("description"), str):
-        sets.append("description = ?")
-        args.append(fields["description"])
-    if fields.get("status") in TASK_STATUSES:
-        sets.append("status = ?")
-        args.append(fields["status"])
+    if isinstance(fields.get("body"), str):
+        sets.append("body = ?")
+        args.append(fields["body"])
     if not sets:
         return {"ok": False, "reason": "nothing to update"}
     sets.append("updated_at = ?")
-    args += [utcnow(), task_id]
-    with task_conn(project) as conn:
-        cur = conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", args)
+    args += [utcnow(), note_id]
+    with note_conn(project) as conn:
+        cur = conn.execute(f"UPDATE notes SET {', '.join(sets)} WHERE id = ?", args)
         conn.commit()
     return {"ok": cur.rowcount > 0}
 
 
-def delete_task(project: str, task_id: int) -> dict:
-    with task_conn(project) as conn:
-        conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM task_requests WHERE task_id = ?", (task_id,))
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+def delete_note(project: str, note_id: int) -> dict:
+    with note_conn(project) as conn:
+        cur = conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
         conn.commit()
     return {"ok": cur.rowcount > 0}
-
-
-def get_task(project: str, task_id: int) -> dict | None:
-    with task_conn(project, attach_state=True) as conn:
-        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if task is None:
-            return None
-        comments = conn.execute(
-            "SELECT * FROM task_comments WHERE task_id = ? ORDER BY id", (task_id,)
-        ).fetchall()
-        requests = conn.execute(
-            """
-            SELECT r.id, r.timestamp, r.method, r.path, r.response_status,
-                   r.duration_ms, r.request_body, r.response_body, s.read_at,
-                   tr.linked_by
-            FROM task_requests tr
-            JOIN request_logs r ON r.id = tr.request_log_id
-            LEFT JOIN state.read_state s ON s.project = ? AND s.log_id = r.id
-            WHERE tr.task_id = ?
-            ORDER BY r.id DESC
-            """,
-            (project, task_id),
-        ).fetchall()
-    return {
-        "task": dict(task),
-        "comments": [dict(c) for c in comments],
-        "requests": [
-            {**summarize_row(r), "linked_by": r["linked_by"]} for r in requests
-        ],
-    }
-
-
-def add_task_comment(project: str, task_id: int, body: str, author: str) -> dict:
-    with task_conn(project) as conn:
-        exists = conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        if not exists:
-            return {"ok": False, "reason": "unknown task"}
-        cur = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body) VALUES (?, ?, ?)",
-            (task_id, author, body),
-        )
-        conn.commit()
-        row = conn.execute(
-            "SELECT * FROM task_comments WHERE id = ?", (cur.lastrowid,)
-        ).fetchone()
-    return {"ok": True, "comment": dict(row)}
-
-
-def link_task_requests(project: str, task_id: int, ids: list, link: bool) -> dict:
-    with task_conn(project) as conn:
-        if link:
-            exists = conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if not exists:
-                return {"ok": False, "reason": "unknown task"}
-            conn.executemany(
-                "INSERT OR IGNORE INTO task_requests (task_id, request_log_id, linked_by)"
-                " SELECT ?, id, 'manual' FROM request_logs WHERE id = ?",
-                [(task_id, i) for i in ids],
-            )
-        else:
-            conn.executemany(
-                "DELETE FROM task_requests WHERE task_id = ? AND request_log_id = ?",
-                [(task_id, i) for i in ids],
-            )
-        conn.commit()
-    return {"ok": True}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1602,23 +1472,11 @@ class Handler(BaseHTTPRequestHandler):
                 if status is None:
                     return self.send_error_json(404, "unknown run")
                 return self.send_json(status)
-            if route == "/api/tasks":
+            if route == "/api/notes":
                 project = params.get("project", "")
                 if not valid_project(project):
                     return self.send_error_json(404, "unknown project")
-                return self.send_json(list_tasks(project))
-            if route == "/api/task":
-                project = params.get("project", "")
-                if not valid_project(project):
-                    return self.send_error_json(404, "unknown project")
-                try:
-                    task_id = int(params.get("id", ""))
-                except ValueError:
-                    return self.send_error_json(400, "bad id")
-                detail = get_task(project, task_id)
-                if detail is None:
-                    return self.send_error_json(404, "not found")
-                return self.send_json(detail)
+                return self.send_json(list_notes(project))
             return self.send_error_json(404, "not found")
         except Exception as e:  # keep the viewer up on any single bad request
             import traceback
@@ -1652,9 +1510,6 @@ class Handler(BaseHTTPRequestHandler):
                 prompt = str(payload.get("prompt", "")).strip()
                 if not prompt:
                     return self.send_error_json(400, "prompt required")
-                task_id = payload.get("task_id")
-                if task_id is not None and not isinstance(task_id, int):
-                    return self.send_error_json(400, "bad task_id")
                 resume = payload.get("resume_session_id")
                 if resume is not None and (
                     not isinstance(resume, str)
@@ -1664,7 +1519,6 @@ class Handler(BaseHTTPRequestHandler):
                 run_id = start_run(
                     project,
                     prompt,
-                    task_id,
                     bool(payload.get("continue", False)),
                     resume,
                 )
@@ -1681,48 +1535,25 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 return self.send_json({"ok": True, "run_id": new_id})
 
-            if route == "/api/task_create":
+            if route == "/api/note_create":
                 title = str(payload.get("title", "")).strip()
-                if not title:
-                    return self.send_error_json(400, "title required")
-                description = str(payload.get("description", ""))
-                return self.send_json(create_task(project, title, description))
+                body = str(payload.get("body", ""))
+                if not (title or body.strip()):
+                    return self.send_error_json(400, "title or body required")
+                return self.send_json(create_note(project, title, body))
 
-            if route == "/api/task_update":
-                task_id = payload.get("id")
-                if not isinstance(task_id, int):
+            if route == "/api/note_update":
+                note_id = payload.get("id")
+                if not isinstance(note_id, int):
                     return self.send_error_json(400, "bad id")
-                result = update_task(project, task_id, payload)
+                result = update_note(project, note_id, payload)
                 return self.send_json(result, status=200 if result.get("ok") else 400)
 
-            if route == "/api/task_delete":
-                task_id = payload.get("id")
-                if not isinstance(task_id, int):
+            if route == "/api/note_delete":
+                note_id = payload.get("id")
+                if not isinstance(note_id, int):
                     return self.send_error_json(400, "bad id")
-                result = delete_task(project, task_id)
-                return self.send_json(result, status=200 if result.get("ok") else 404)
-
-            if route == "/api/task_comment":
-                task_id = payload.get("task_id")
-                body = str(payload.get("body", "")).strip()
-                if not isinstance(task_id, int):
-                    return self.send_error_json(400, "bad task_id")
-                if not body:
-                    return self.send_error_json(400, "body required")
-                author = str(payload.get("author", "")).strip() or "user"
-                result = add_task_comment(project, task_id, body, author[:64])
-                return self.send_json(result, status=200 if result.get("ok") else 404)
-
-            if route == "/api/task_link":
-                task_id = payload.get("task_id")
-                ids = self.parse_ids(payload)
-                if not isinstance(task_id, int):
-                    return self.send_error_json(400, "bad task_id")
-                if ids is None:
-                    return self.send_error_json(400, "ids must be a list of ints")
-                result = link_task_requests(
-                    project, task_id, ids, bool(payload.get("link", True))
-                )
+                result = delete_note(project, note_id)
                 return self.send_json(result, status=200 if result.get("ok") else 404)
 
             if route == "/api/mark":

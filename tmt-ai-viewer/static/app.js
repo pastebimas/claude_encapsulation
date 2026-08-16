@@ -14,9 +14,9 @@ const state = {
   selectedId: null,
   detail: null,
   detailTab: "summary",
-  tasks: [],
-  taskId: null,
-  taskDetail: null,
+  notes: [],
+  noteId: null,
+  noteEdit: false,
   runs: [],
   expandedSessions: new Set(),
   sessionMembers: {},
@@ -121,8 +121,8 @@ async function selectProject(name) {
   state.offset = 0;
   state.selectedId = null;
   state.detail = null;
-  state.taskId = null;
-  state.taskDetail = null;
+  state.noteId = null;
+  state.noteEdit = false;
   state.expandedSessions = new Set();
   state.sessionMembers = {};
   $("#empty-state").hidden = true;
@@ -133,7 +133,7 @@ async function selectProject(name) {
   closePanels();
   renderProjects();
   renderRunsStrip();
-  await Promise.all([loadRequests(false), loadStatus(), loadTaskList()]);
+  await Promise.all([loadRequests(false), loadStatus(), loadNotes()]);
 }
 
 // ---- docker status --------------------------------------------------------
@@ -369,14 +369,12 @@ function renderDetail() {
     metaChip("out", fmtTokens(usage.output_tokens)),
     metaChip("cache read", fmtTokens(usage.cache_read_input_tokens)),
     metaChip("session", det.session_id ? det.session_id.slice(0, 8) : null),
-    ...(det.tasks || []).map((t) => metaChip("task", `#${t.id} ${t.title}`)),
   ].join("");
 
   $("#btn-toggle-read").textContent = det.read_at ? "Mark unread" : "Mark read";
   $("#followup-hint").textContent = det.session_id
     ? `resumes session ${det.session_id.slice(0, 8)}…`
     : "no session id — continues the project's most recent conversation";
-  renderLinkTaskOptions();
   renderDetailBody();
 }
 
@@ -596,208 +594,159 @@ async function deleteRequest(id) {
   loadProjects();
 }
 
-// ---- tasks panel ----------------------------------------------------------
+// ---- notes panel -----------------------------------------------------------
 
-const TASK_CYCLE = { todo: "doing", doing: "done", done: "todo" };
-const TASK_ICON = { todo: "", doing: "◐", done: "✓" };
+const CHECK_RE = /^(\s*)- \[( |~|x)\] (.*)$/;
+const MARK_CYCLE = { " ": "~", "~": "x", x: " " };
+const MARK_ICON = { " ": "", "~": "◐", x: "✓" };
 
-async function loadTaskList() {
+function currentNote() {
+  return state.notes.find((n) => n.id === state.noteId) || null;
+}
+
+async function loadNotes() {
   if (!state.project) return;
   try {
-    const data = await api(`/api/tasks?project=${encodeURIComponent(state.project)}`);
-    state.tasks = data.tasks || [];
-    $("#tasks-status").textContent = "";
+    const data = await api(`/api/notes?project=${encodeURIComponent(state.project)}`);
+    state.notes = data.notes || [];
+    $("#notes-status").textContent = "";
   } catch (e) {
-    state.tasks = [];
-    $("#tasks-status").textContent = "error: " + e.message;
+    state.notes = [];
+    $("#notes-status").textContent = "error: " + e.message;
   }
-  renderTaskList();
-  renderLinkTaskOptions();
+  renderNoteList();
+  renderNoteDetail();
 }
 
-async function openTasks() {
+async function openNotes() {
   closePanels();
-  $("#tasks-panel").hidden = false;
-  $("#tasks-title").textContent = `Tasks — ${state.project}`;
-  $("#tasks-hide-done").checked =
-    localStorage.getItem(`tmt-hide-done:${state.project}`) === "1";
-  await loadTaskList();
-  if (state.taskId && !state.tasks.some((t) => t.id === state.taskId)) state.taskId = null;
-  if (state.taskId) await selectTask(state.taskId);
-  else renderTaskDetail(null);
+  $("#notes-panel").hidden = false;
+  $("#notes-title").textContent = `Notes — ${state.project}`;
+  await loadNotes();
+  if (state.noteId && !currentNote()) state.noteId = null;
+  renderNoteList();
+  renderNoteDetail();
 }
 
-function renderTaskList() {
-  const ul = $("#tasks-list");
+function noteLabel(note) {
+  if (note.title) return note.title;
+  const first = (note.body || "").split("\n").find((l) => l.trim());
+  return first ? first.trim() : "(empty note)";
+}
+
+function noteProgress(note) {
+  let open = 0, done = 0;
+  for (const line of (note.body || "").split("\n")) {
+    const m = line.match(CHECK_RE);
+    if (!m) continue;
+    if (m[2] === "x") done++;
+    else open++;
+  }
+  return { open, done };
+}
+
+function renderNoteList() {
+  const ul = $("#notes-list");
   ul.innerHTML = "";
-  const todos = state.tasks.filter((t) => t.status === "todo");
-  const runAll = $("#btn-run-todos");
-  runAll.hidden = todos.length === 0;
-  runAll.textContent = `▶ Run all todo (${todos.length})`;
-  const runningTasks = new Set(
-    state.runs.filter((r) => r.status === "running").map((r) => r.task_id)
-  );
-  const hideDone = $("#tasks-hide-done").checked;
-  const doneCount = state.tasks.filter((t) => t.status === "done").length;
-  $("#tasks-done-count").textContent =
-    hideDone && doneCount ? `(${doneCount} hidden)` : "";
-  const visible = hideDone
-    ? state.tasks.filter((t) => t.status !== "done")
-    : state.tasks;
-  for (const task of visible) {
+  for (const note of state.notes) {
     const li = document.createElement("li");
-    li.className =
-      `task-item ${task.status}` + (task.id === state.taskId ? " active" : "");
-    const running = runningTasks.has(task.id);
-    const tok = (task.input_tokens || 0) + (task.output_tokens || 0);
+    li.className = "note-item" + (note.id === state.noteId ? " active" : "");
+    const p = noteProgress(note);
     li.innerHTML = `
-      <button class="t-check" title="todo → doing → done">${TASK_ICON[task.status] || ""}</button>
-      <input class="t-text" value="${esc(task.title)}">
-      ${task.origin === "agent" ? `<span class="t-origin" title="created by claude during a session">agent</span>` : ""}
-      ${tok ? `<span class="t-tokens" title="${esc(tokenBreakdown(task))}">${esc(fmtTokens(tok))} tok</span>` : ""}
-      <span class="t-counts" title="linked requests / comments">${task.request_count || 0}⇅ ${task.comment_count || 0}💬</span>
-      ${task.status !== "done" ? `<button class="t-run" title="run this task as its own claude session" ${running ? "disabled" : ""}>${running ? "…" : "▶"}</button>` : ""}
-      <button class="t-done" title="${task.status === "done" ? "reopen (back to todo)" : "mark done"}">${task.status === "done" ? "↩" : "✓"}</button>
-      <button class="t-del" title="delete task">✕</button>`;
-    li.onclick = () => selectTask(task.id);
-    const runBtn = li.querySelector(".t-run");
-    if (runBtn)
-      runBtn.onclick = (e) => {
-        e.stopPropagation();
-        runTask(task);
-      };
-    li.querySelector(".t-check").onclick = (e) => {
-      e.stopPropagation();
-      taskUpdate(task.id, { status: TASK_CYCLE[task.status] || "todo" });
-    };
-    li.querySelector(".t-done").onclick = (e) => {
-      e.stopPropagation();
-      taskUpdate(task.id, { status: task.status === "done" ? "todo" : "done" });
-    };
-    const input = li.querySelector(".t-text");
-    input.onclick = (e) => {
-      e.stopPropagation();
-      if (state.taskId !== task.id) selectTask(task.id);
-    };
-    input.onchange = () => taskUpdate(task.id, { title: input.value.trim() });
-    li.querySelector(".t-del").onclick = async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Delete task "${task.title}" with its links and comments?`)) return;
-      await post("/api/task_delete", { project: state.project, id: task.id });
-      if (state.taskId === task.id) {
-        state.taskId = null;
-        renderTaskDetail(null);
-      }
-      loadTaskList();
+      <span class="n-title">${esc(noteLabel(note))}</span>
+      ${note.origin === "agent" ? `<span class="t-origin" title="saved from an agent run's NOTES: section">agent</span>` : ""}
+      ${p.open + p.done ? `<span class="n-progress" title="done / total checklist items">${p.done}/${p.open + p.done}</span>` : ""}
+      <span class="n-when" title="${esc(fullTime(note.updated_at))}">${esc(fmtTime(note.updated_at))}</span>`;
+    li.onclick = () => {
+      state.noteId = note.id;
+      state.noteEdit = false;
+      renderNoteList();
+      renderNoteDetail();
     };
     ul.appendChild(li);
   }
 }
 
-async function taskUpdate(id, fields) {
+async function noteUpdate(id, fields) {
   try {
-    await post("/api/task_update", { project: state.project, id, ...fields });
+    await post("/api/note_update", { project: state.project, id, ...fields });
   } catch (e) {
-    $("#tasks-status").textContent = "save failed: " + e.message;
+    $("#notes-status").textContent = "save failed: " + e.message;
   }
-  await loadTaskList();
-  if (state.taskId === id) selectTask(id);
+  await loadNotes();
 }
 
-async function selectTask(id) {
-  state.taskId = id;
-  try {
-    state.taskDetail = await api(
-      `/api/task?project=${encodeURIComponent(state.project)}&id=${id}`
-    );
-  } catch (e) {
-    $("#tasks-status").textContent = "error: " + e.message;
+function runLine(note, text) {
+  const prompt = (note.title ? note.title + ": " : "") + text;
+  return post("/api/run", { project: state.project, prompt })
+    .then(pollRuns)
+    .catch((e) => {
+      $("#notes-status").textContent = "run failed: " + e.message;
+    });
+}
+
+function renderNoteDetail() {
+  const note = currentNote();
+  $("#note-detail-empty").hidden = !!note;
+  $("#note-detail").hidden = !note;
+  if (!note) return;
+
+  const title = $("#note-title");
+  title.value = note.title || "";
+  title.onchange = () => noteUpdate(note.id, { title: title.value });
+
+  const lines = (note.body || "").split("\n");
+  const openLines = lines.filter((l) => {
+    const m = l.match(CHECK_RE);
+    return m && m[2] !== "x";
+  });
+  const runAll = $("#note-run-all");
+  runAll.hidden = openLines.length === 0;
+  runAll.textContent = `▶ Run all open (${openLines.length})`;
+  runAll.onclick = () => {
+    for (const l of openLines) runLine(note, l.match(CHECK_RE)[3]);
+  };
+
+  $("#note-edit").textContent = state.noteEdit ? "👁 View" : "✎ Edit";
+  const ta = $("#note-body");
+  const view = $("#note-body-view");
+  ta.hidden = !state.noteEdit;
+  view.hidden = state.noteEdit;
+  $("#note-meta").textContent =
+    `${note.origin} · created ${fmtTime(note.created_at)} · updated ${fmtTime(note.updated_at)}`;
+
+  if (state.noteEdit) {
+    ta.value = note.body || "";
+    ta.onchange = () => noteUpdate(note.id, { body: ta.value });
     return;
   }
-  renderTaskList();
-  renderTaskDetail(state.taskDetail);
-}
 
-function renderTaskDetail(detail) {
-  $("#task-detail-empty").hidden = !!detail;
-  $("#task-detail").hidden = !detail;
-  if (!detail) return;
-
-  const desc = $("#task-desc");
-  desc.value = detail.task.description || "";
-  desc.onchange = () => taskUpdate(detail.task.id, { description: desc.value });
-
-  const tok = detail.requests.reduce(
-    (sum, r) => sum + (r.input_tokens || 0) + (r.output_tokens || 0),
-    0
-  );
-  $("#task-req-count").textContent = `(${detail.requests.length}${tok ? ` · ${fmtTokens(tok)} tok` : ""})`;
-  const reqs = $("#task-requests");
-  reqs.innerHTML = detail.requests.length
-    ? ""
-    : `<div class="t-empty">No linked requests — set the task to ◐ doing and new requests attach automatically, or link one from a request's detail view.</div>`;
-  for (const req of detail.requests) {
+  view.innerHTML = "";
+  lines.forEach((line, idx) => {
+    const m = line.match(CHECK_RE);
     const div = document.createElement("div");
-    div.className = "t-req";
-    const ok = req.response_status >= 200 && req.response_status < 300;
+    if (!m) {
+      div.className = "n-line";
+      div.textContent = line;
+      view.appendChild(div);
+      return;
+    }
+    const mark = m[2];
+    div.className =
+      "n-check" + (mark === "x" ? " done" : mark === "~" ? " doing" : "");
     div.innerHTML = `
-      <span class="${ok ? "status-ok" : "status-err"}">${req.response_status ?? "?"}</span>
-      <span class="model">${esc(shortModel(req.model) || req.path)}</span>
-      <span title="${esc(fullTime(req.timestamp))}">${esc(fmtTime(req.timestamp))}</span>
-      <span class="lb">${esc(req.linked_by)}</span>
-      <span class="snip">${esc(req.request_snippet || "")}</span>
-      <button class="t-unlink" title="unlink from task">✕</button>`;
-    div.onclick = () => {
-      closePanels();
-      openDetail(req.id);
+      <button class="n-mark" title="todo → in progress → done">${MARK_ICON[mark] || ""}</button>
+      <span class="n-text">${esc(m[3])}</span>
+      ${mark === "x" ? "" : `<button class="n-run" title="run this line as its own claude session">▶</button>`}`;
+    div.querySelector(".n-mark").onclick = () => {
+      const next = lines.slice();
+      next[idx] = `${m[1]}- [${MARK_CYCLE[mark]}] ${m[3]}`;
+      noteUpdate(note.id, { body: next.join("\n") });
     };
-    div.querySelector(".t-unlink").onclick = async (e) => {
-      e.stopPropagation();
-      await post("/api/task_link", {
-        project: state.project,
-        task_id: detail.task.id,
-        ids: [req.id],
-        link: false,
-      });
-      await loadTaskList();
-      selectTask(detail.task.id);
-    };
-    reqs.appendChild(div);
-  }
-
-  const ul = $("#task-comments");
-  ul.innerHTML = detail.comments.length
-    ? ""
-    : `<li class="t-empty">No comments yet.</li>`;
-  for (const c of detail.comments) {
-    const li = document.createElement("li");
-    li.className = "t-comment";
-    li.innerHTML = `
-      <span class="author ${esc(c.author)}">${esc(c.author)}</span>
-      <span class="when" title="${esc(fullTime(c.created_at))}">${esc(fmtTime(c.created_at))}</span>
-      <div class="body">${esc(c.body)}</div>`;
-    ul.appendChild(li);
-  }
-}
-
-function renderLinkTaskOptions() {
-  const sel = $("#link-task");
-  const linked = new Set(((state.detail || {}).tasks || []).map((t) => t.id));
-  sel.innerHTML =
-    `<option value="">＋ link to task…</option>` +
-    state.tasks
-      .filter((t) => !linked.has(t.id))
-      .map((t) => `<option value="${t.id}">#${t.id} ${esc(t.title)}</option>`)
-      .join("");
-  const ct = $("#c-task");
-  const current = ct.value;
-  ct.innerHTML =
-    `<option value="">no task</option>` +
-    state.tasks
-      .filter((t) => t.status !== "done")
-      .map((t) => `<option value="${t.id}">#${t.id} ${esc(t.title)}</option>`)
-      .join("");
-  ct.value = current;
+    const run = div.querySelector(".n-run");
+    if (run) run.onclick = () => runLine(note, m[3]);
+    view.appendChild(div);
+  });
 }
 
 // ---- usage bar (tokens, last 5 min) -----------------------------------------
@@ -831,9 +780,9 @@ function renderUsageBar(u) {
     topEl.onclick = null;
     return;
   }
-  const label = top.task_id
-    ? `<span class="ub-task">#${top.task_id} ${esc(top.title || "")}</span>`
-    : `<span class="ub-task">no task</span>`;
+  const label = top.session_id
+    ? `<span class="ub-session">session ${esc(top.session_id.slice(0, 8))}</span>`
+    : `<span class="ub-session">no session</span>`;
   topEl.innerHTML = `top: ${label} <span class="ub-proj">(${esc(top.project)})</span> — ${esc(fmtTokens(top.tokens))} tok`;
   topEl.title = tokenBreakdown(top);
   topEl.onclick = () => selectProject(top.project);
@@ -880,7 +829,7 @@ async function pollRuns() {
       loadProjects();
       if (finished.some((r) => r.project === state.project)) {
         loadRequests(false);
-        loadTaskList();
+        loadNotes();
       }
     }
   } catch (e) {
@@ -990,7 +939,6 @@ function renderRunsStrip() {
         <span class="run-dot">${run.status === "running" ? "" : RUN_ICON[run.status] || "?"}</span>
         <span class="strip-label">${esc(label)}</span>
         ${run.resume_session_id ? `<span class="strip-resumed" title="resumed session ${esc(run.resume_session_id)}">↩ resumed</span>` : ""}
-        ${run.task_id ? `<span class="strip-task">task #${run.task_id}</span>` : ""}
         ${run.error ? `<span class="strip-err" title="${esc(run.error)}">${esc(run.error)}</span>` : ""}
         ${resumeAt ? `<span class="strip-resume-at" title="hit a usage limit — will auto-continue when it resets">⏱ auto-continue ${esc(resumeAt)}</span>` : ""}
         <span class="strip-prompt">${esc(run.prompt)}</span>
@@ -1027,7 +975,6 @@ function renderRunsStrip() {
 async function startRun() {
   const prompt = $("#c-prompt").value.trim();
   if (!prompt || !state.project) return;
-  const taskId = parseInt($("#c-task").value, 10) || null;
   const btn = $("#c-run");
   btn.disabled = true;
   $("#c-status").textContent = "";
@@ -1035,30 +982,16 @@ async function startRun() {
     await post("/api/run", {
       project: state.project,
       prompt,
-      task_id: taskId,
       continue: $("#c-continue").checked,
     });
     $("#c-prompt").value = "";
     $("#c-continue").checked = false;
-    $("#c-task").value = "";
   } catch (e) {
     $("#c-status").textContent = "failed: " + e.message;
   } finally {
     btn.disabled = false;
   }
   pollRuns();
-}
-
-async function runTask(task) {
-  const prompt =
-    task.title + (task.description ? "\n\n" + task.description : "");
-  try {
-    await post("/api/run", { project: state.project, prompt, task_id: task.id });
-  } catch (e) {
-    $("#tasks-status").textContent = "run failed: " + e.message;
-  }
-  pollRuns();
-  loadTaskList();
 }
 
 async function sendFollowup() {
@@ -1069,8 +1002,6 @@ async function sendFollowup() {
   const body = { project: state.project, prompt };
   if (det.session_id) body.resume_session_id = det.session_id;
   else body.continue = true;
-  const taskIds = (det.tasks || []).map((t) => t.id);
-  if (taskIds.length === 1) body.task_id = taskIds[0];
   const btn = $("#followup-send");
   btn.disabled = true;
   try {
@@ -1123,7 +1054,7 @@ async function openContext() {
 }
 
 function closePanels() {
-  $("#tasks-panel").hidden = true;
+  $("#notes-panel").hidden = true;
   $("#context-panel").hidden = true;
 }
 
@@ -1188,49 +1119,40 @@ $("#btn-toggle-read").onclick = () => {
   if (state.detail) setRead([state.detail.id], !state.detail.read_at);
 };
 $("#btn-delete").onclick = () => state.detail && deleteRequest(state.detail.id);
-$("#btn-tasks").onclick = openTasks;
-$("#btn-tasks-close").onclick = closePanels;
-$("#tasks-hide-done").onchange = (e) => {
-  localStorage.setItem(
-    `tmt-hide-done:${state.project}`,
-    e.target.checked ? "1" : "0"
-  );
-  renderTaskList();
-};
+$("#btn-notes").onclick = openNotes;
+$("#btn-notes-close").onclick = closePanels;
 $("#btn-context").onclick = openContext;
 $("#btn-context-close").onclick = closePanels;
-$("#tasks-add-form").onsubmit = async (e) => {
+$("#notes-add-form").onsubmit = async (e) => {
   e.preventDefault();
-  const input = $("#tasks-add-input");
+  const input = $("#notes-add-input");
   const title = input.value.trim();
   if (!title) return;
   input.value = "";
   try {
-    const res = await post("/api/task_create", { project: state.project, title });
-    await loadTaskList();
-    if (res.task) selectTask(res.task.id);
+    const res = await post("/api/note_create", { project: state.project, title, body: "" });
+    await loadNotes();
+    if (res.note) {
+      state.noteId = res.note.id;
+      state.noteEdit = true;
+      renderNoteList();
+      renderNoteDetail();
+    }
   } catch (err) {
-    $("#tasks-status").textContent = "create failed: " + err.message;
+    $("#notes-status").textContent = "create failed: " + err.message;
   }
 };
-$("#task-comment-form").onsubmit = async (e) => {
-  e.preventDefault();
-  const input = $("#task-comment-input");
-  const body = input.value.trim();
-  if (!body || !state.taskId) return;
-  input.value = "";
-  try {
-    await post("/api/task_comment", {
-      project: state.project,
-      task_id: state.taskId,
-      body,
-      author: "user",
-    });
-  } catch (err) {
-    $("#tasks-status").textContent = "comment failed: " + err.message;
-  }
-  await loadTaskList();
-  selectTask(state.taskId);
+$("#note-edit").onclick = () => {
+  state.noteEdit = !state.noteEdit;
+  renderNoteDetail();
+};
+$("#note-delete").onclick = async () => {
+  const note = currentNote();
+  if (!note) return;
+  if (!confirm(`Delete note "${noteLabel(note)}"?`)) return;
+  await post("/api/note_delete", { project: state.project, id: note.id });
+  state.noteId = null;
+  loadNotes();
 };
 $("#c-run").onclick = startRun;
 $("#c-prompt").addEventListener("keydown", (e) => {
@@ -1240,24 +1162,6 @@ $("#followup-send").onclick = sendFollowup;
 $("#followup-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendFollowup();
 });
-$("#btn-run-todos").onclick = async () => {
-  for (const task of state.tasks.filter((t) => t.status === "todo")) {
-    await runTask(task);
-  }
-};
-$("#link-task").onchange = async (e) => {
-  const id = parseInt(e.target.value, 10);
-  e.target.value = "";
-  if (!id || !state.detail) return;
-  await post("/api/task_link", {
-    project: state.project,
-    task_id: id,
-    ids: [state.detail.id],
-    link: true,
-  });
-  await loadTaskList();
-  openDetail(state.detail.id);
-};
 document.querySelectorAll("#detail-tabs .tab").forEach((tab) => {
   tab.onclick = () => {
     state.detailTab = tab.dataset.tab;

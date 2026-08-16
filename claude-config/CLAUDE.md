@@ -21,6 +21,6 @@
 - **One-sentence end-of-turn summary, max.** No bulleted recap.
 - **No multi-line comments in config files** (compose.yml, json, etc.) explaining a value.
 
-## Task tracking (tmt-ai dashboard)
+## Notes (tmt-ai dashboard)
 
-Whenever the user asks you to "make tasks", plan work, review-and-list improvements, or produce action items, record each item with your **TaskCreate** tool and keep statuses current with **TaskUpdate** as you work — the tmt-ai proxy extracts these tool calls into the dashboard automatically. Tasks written only into a markdown file are invisible to the dashboard; if the user also wants a file, do both.
+The dashboard no longer reads TaskCreate/TaskUpdate tool calls — use the task tools only for your own in-session tracking. If something extra pops up that is worth returning to later (follow-up work, proposals, ideas), end your final reply with a `NOTES:` section listing each item as a `- [ ] item` line. Dashboard-dispatched runs save that section to the project's notes automatically.
