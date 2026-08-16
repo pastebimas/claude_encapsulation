@@ -32,7 +32,7 @@ services:
       context: ./tmt-ai-viewer
     container_name: tmt-ai-viewer
     ports:
-      - "127.0.0.1:8034:8034"
+      - 8034:8034
     volumes:
       - ./data:/data
     environment:
