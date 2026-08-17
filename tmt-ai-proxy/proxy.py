@@ -19,6 +19,8 @@ import aiohttp
 import aiosqlite
 from aiohttp import web
 
+from prompt_extract import extract_user_prompt
+
 
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8080"))
 TARGET_API_URL = os.getenv("TARGET_API_URL", "https://api.anthropic.com")
@@ -308,16 +310,19 @@ class ProjectLogger:
         response_headers_json = json.dumps(dict(response_headers))
 
         request_body_json = None
+        prompt_text = None
         if request_body:
             try:
-                request_body_json = json.dumps(json.loads(request_body))
+                parsed = json.loads(request_body)
+                request_body_json = json.dumps(parsed)
+                prompt_text = extract_user_prompt(parsed)
             except json.JSONDecodeError:
                 request_body_json = json.dumps({"raw": request_body})
 
         db_path = self.db_path_for(project)
         try:
             async with aiosqlite.connect(db_path) as db:
-                await db.execute(
+                cursor = await db.execute(
                     """
                     INSERT INTO request_logs
                     (timestamp, method, path, target_url, request_headers, request_body,
@@ -338,6 +343,14 @@ class ProjectLogger:
                         session_id,
                     ),
                 )
+                # Human-typed prompts get their own row so the viewer can list
+                # them without re-parsing bodies (see prompt_extract.py).
+                if prompt_text is not None:
+                    await db.execute(
+                        "INSERT OR IGNORE INTO user_prompts"
+                        " (log_id, session_id, timestamp, prompt_text) VALUES (?, ?, ?, ?)",
+                        (cursor.lastrowid, session_id, timestamp, prompt_text),
+                    )
                 await db.commit()
         except Exception as e:
             print(f"✗ Failed to write log for project '{project}' ({db_path}): {e}")
@@ -438,8 +451,17 @@ async def health_check(request: web.Request) -> web.Response:
 async def init_app() -> web.Application:
     app = web.Application()
     logger = ProjectLogger(DATA_DIR)
-    # Pre-init the default DB so Datasette has something to mount at startup.
+    # Pre-init the default DB so Datasette has something to mount at startup,
+    # and migrate every existing project DB so new migrations (e.g. the
+    # user_prompts backfill) apply without waiting for fresh traffic.
     await logger.ensure_initialized(DEFAULT_PROJECT)
+    for db_file in sorted(DATA_DIR.glob("*.db")):
+        if db_file.name.startswith("."):  # skip .viewer-state.db etc.
+            continue
+        try:
+            await logger.ensure_initialized(db_file.stem)
+        except Exception as e:
+            print(f"  ! Failed to initialize '{db_file.stem}': {e}")
     app["logger"] = logger
     app["target_api_url"] = TARGET_API_URL
 

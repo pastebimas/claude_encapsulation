@@ -9,6 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY proxy.py .
+COPY prompt_extract.py .
 COPY migrations/ ./migrations/
 
 RUN mkdir -p /data && chmod 777 /data

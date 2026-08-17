@@ -99,19 +99,6 @@ def ensure_state_db():
             )
             """
         )
-        # Memoized "is this a human prompt?" per request row (rows are
-        # immutable, so classification never changes). Filled lazily by
-        # ensure_prompt_class(); keeps the "My prompts" view fast.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS prompt_class (
-                project   TEXT NOT NULL,
-                log_id    INTEGER NOT NULL,
-                is_prompt INTEGER NOT NULL,
-                PRIMARY KEY (project, log_id)
-            )
-            """
-        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -308,110 +295,18 @@ def user_ask_text(content) -> str:
     return REMINDER_RE.sub("", "\n".join(texts)).strip()
 
 
-# --- "my prompts" classification --------------------------------------------
-# A request counts as a human prompt (something the user typed) when its last
-# message is real typed text on the primary model, i.e. NOT a tool-loop
-# continuation, background/subagent call, or one of Claude Code's injected
-# synthetic messages (recaps, suggestions, quota checks, notifications,
-# transcript summaries, document dumps). See is_user_prompt_row().
-
-# Lowercased openings of auto-generated user messages to exclude.
-SYNTHETIC_PREFIXES = (
-    "the user stepped away",
-    "[suggestion mode",
-    "[system notification",
-    "the coordinator sent a message",
-    "<task-notification",
-    "<transcript",
-    "<!doctype",
-    "<?php",
-    "<html",
-    "quota",
+# The "My prompts" view reads user_prompts, which the proxy fills at ingest
+# (tmt-ai-proxy/prompt_extract.py). This guard only prevents a "no such table"
+# error on a project DB the proxy hasn't migrated yet — it stays empty until
+# the proxy backfills it.
+USER_PROMPTS_DDL = """
+CREATE TABLE IF NOT EXISTS user_prompts (
+    log_id      INTEGER PRIMARY KEY,
+    session_id  TEXT,
+    timestamp   TEXT,
+    prompt_text TEXT NOT NULL
 )
-
-PRIMARY_MODEL_SQL = (
-    "(json_extract(r.request_body, '$.model') LIKE 'claude-opus%'"
-    " OR json_extract(r.request_body, '$.model') LIKE 'claude-sonnet%')"
-)
-
-
-def mine_candidate_sql(base: str) -> str:
-    """Per-row (id, last_text, last_tr) for the last *user*-role message.
-
-    Claude Code appends trailing `system`/`<total_tokens>` messages, so the
-    real prompt/continuation is the last user-role message, not the last array
-    element. The last-user index is computed once per row (innermost select) to
-    avoid rescanning the messages array; the outer json_each only walks that one
-    message's content blocks. Nested selects keep the messages json_each to a
-    single pass per row (large DBs have thousands of rows × hundreds of msgs).
-    """
-    return f"""
-        SELECT id,
-               COALESCE(
-                   (SELECT json_extract(je.value, '$.text')
-                    FROM json_each(arr) je
-                    WHERE json_extract(je.value, '$.type') = 'text' LIMIT 1),
-                   CASE WHEN ctype = 'text' THEN content END
-               ) AS last_text,
-               EXISTS(SELECT 1 FROM json_each(arr) je
-                      WHERE json_extract(je.value, '$.type') = 'tool_result') AS last_tr
-        FROM (
-            SELECT id, ctype, content,
-                   CASE WHEN ctype = 'array' THEN content ELSE '[]' END AS arr
-            FROM (
-                SELECT id, json_type(rb, pth) AS ctype, json_extract(rb, pth) AS content
-                FROM (
-                    SELECT r.id AS id, r.request_body AS rb,
-                           '$.messages[' || (
-                               SELECT MAX(m.key)
-                               FROM json_each(json_extract(r.request_body, '$.messages')) m
-                               WHERE json_extract(m.value, '$.role') = 'user'
-                           ) || '].content' AS pth
-                    {base}
-                )
-            )
-        )
-        ORDER BY id DESC
-    """
-
-
-def is_user_prompt_row(last_text, last_tool_result) -> bool:
-    """Classify a candidate row (already primary-model) as a human prompt."""
-    if last_tool_result:
-        return False
-    text = REMINDER_RE.sub("", last_text or "").strip()
-    if not text:
-        return False
-    low = text.lower()
-    return not any(low.startswith(p) for p in SYNTHETIC_PREFIXES)
-
-
-def ensure_prompt_class(conn: sqlite3.Connection, project: str):
-    """Classify any primary-model rows not yet in state.prompt_class.
-
-    The body parse is the expensive part, so it runs once per row; steady
-    state only touches newly-arrived requests.
-    """
-    # Rows are append-only with monotonic ids, so everything at or below the
-    # highest already-classified id is done — only scan newer rows (avoids a
-    # full-table JSON parse on every call).
-    last = conn.execute(
-        "SELECT COALESCE(MAX(log_id), 0) FROM state.prompt_class WHERE project = ?",
-        (project,),
-    ).fetchone()[0]
-    uncached_base = f"FROM request_logs r WHERE r.id > ? AND {PRIMARY_MODEL_SQL}"
-    cands = conn.execute(mine_candidate_sql(uncached_base), (last,)).fetchall()
-    if not cands:
-        return
-    conn.executemany(
-        "INSERT OR IGNORE INTO state.prompt_class (project, log_id, is_prompt)"
-        " VALUES (?, ?, ?)",
-        [
-            (project, c["id"], 1 if is_user_prompt_row(c["last_text"], c["last_tr"]) else 0)
-            for c in cands
-        ],
-    )
-    conn.commit()
+"""
 
 
 def summarize_row(row: sqlite3.Row) -> dict:
@@ -672,6 +567,8 @@ def query_requests(project: str, params: dict) -> dict:
     with connect(DATA_DIR / f"{project}.db", attach_state=True) as conn:
         has_session = has_session_column(conn)
         session_col = "r.session_id" if has_session else "NULL AS session_id"
+        if mine:
+            conn.execute(USER_PROMPTS_DDL)
 
         sid = (params.get("session_id") or "").strip()
         if sid and has_session:
@@ -710,19 +607,16 @@ def query_requests(project: str, params: dict) -> dict:
                 args + [project, limit, offset],
             ).fetchall()
         elif mine:
-            # Classify (once per row) into the memo, then paginate in SQL by
-            # joining prompt_class — no body parsing on the hot path.
-            ensure_prompt_class(conn, project)
+            # Human-typed prompts only — the proxy captured them at ingest, so
+            # this is a plain join, no body parsing.
             mine_from = f"""
                 FROM request_logs r
-                JOIN state.prompt_class pc
-                    ON pc.project = ? AND pc.log_id = r.id AND pc.is_prompt = 1
+                JOIN user_prompts up ON up.log_id = r.id
                 LEFT JOIN state.read_state s ON s.project = ? AND s.log_id = r.id
                 {where_sql}
             """
-            mine_args = [project, project] + args[1:]
             total = conn.execute(
-                f"SELECT COUNT(*) {mine_from}", mine_args
+                f"SELECT COUNT(*) {mine_from}", args
             ).fetchone()[0]
             rows = conn.execute(
                 f"""
@@ -732,7 +626,7 @@ def query_requests(project: str, params: dict) -> dict:
                 {mine_from}
                 ORDER BY r.id DESC LIMIT ? OFFSET ?
                 """,
-                mine_args + [limit, offset],
+                args + [limit, offset],
             ).fetchall()
         else:
             total = conn.execute(f"SELECT COUNT(*) {base}", args).fetchone()[0]
