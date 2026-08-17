@@ -749,15 +749,19 @@ function renderNoteDetail() {
   });
 }
 
-// ---- usage bar (tokens, last 5 min) -----------------------------------------
+// ---- usage bar (tokens, rolling windows) ------------------------------------
 
 function tokenBreakdown(u) {
   return `in ${u.input_tokens || 0} / out ${u.output_tokens || 0} / cache write ${u.cache_creation_tokens || 0} / cache read ${u.cache_read_tokens || 0}`;
 }
 
+function windowLabel(minutes) {
+  return minutes < 60 ? `${minutes}m` : `${minutes / 60}h`;
+}
+
 async function pollUsage() {
   try {
-    renderUsageBar(await api("/api/usage_recent?minutes=5"));
+    renderUsageBar(await api("/api/usage_windows"));
   } catch (e) {
     console.error("pollUsage", e);
   }
@@ -766,12 +770,19 @@ async function pollUsage() {
 function renderUsageBar(u) {
   const bar = $("#usage-bar");
   bar.hidden = false;
-  bar.classList.toggle("idle", !u.tokens);
-  const total = $("#ub-total");
-  total.textContent = u.tokens
-    ? `${fmtTokens(u.tokens)} tok · ${u.requests} request${u.requests === 1 ? "" : "s"}`
-    : "idle";
-  total.title = tokenBreakdown(u);
+  const windows = u.windows || [];
+  const active = windows.some((w) => w.tokens);
+  bar.classList.toggle("idle", !active);
+  const winEl = $("#ub-windows");
+  winEl.innerHTML = active
+    ? windows
+        .map(
+          (w) =>
+            `<span class="ub-win" title="${esc(tokenBreakdown(w))} · ${w.requests} request${w.requests === 1 ? "" : "s"}">` +
+            `<span class="ub-win-label">${windowLabel(w.minutes)}</span> ${esc(fmtTokens(w.tokens))}</span>`
+        )
+        .join("")
+    : '<span class="ub-idle">idle</span>';
   const topEl = $("#ub-top");
   const top = (u.top || [])[0];
   if (!top || !top.tokens) {

@@ -175,8 +175,17 @@ pre, code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; 
   font-weight: 700;
   white-space: nowrap;
 }
-#ub-total { font-weight: 700; white-space: nowrap; }
-#usage-bar.idle #ub-total { color: var(--muted); font-weight: 400; }
+#ub-windows { display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline; }
+.ub-win { font-weight: 700; white-space: nowrap; }
+.ub-win-label {
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-right: 2px;
+}
+.ub-idle { color: var(--muted); }
 #ub-top {
   color: var(--muted);
   overflow: hidden;

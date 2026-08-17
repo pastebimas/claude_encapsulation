@@ -381,6 +381,15 @@ TOKEN_SUMS = ", ".join(
         ("cache_read_input_tokens", "cache_read_tokens"),
     )
 )
+TOKEN_COLS = ", ".join(
+    f"{_tok(field)} AS {alias}"
+    for field, alias in (
+        ("input_tokens", "input_tokens"),
+        ("output_tokens", "output_tokens"),
+        ("cache_creation_input_tokens", "cache_creation_tokens"),
+        ("cache_read_input_tokens", "cache_read_tokens"),
+    )
+)
 TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens")
 
 
@@ -438,6 +447,65 @@ def usage_recent(minutes: int = 5) -> dict:
         **totals,
         "top": consumers[:5],
     }
+
+
+USAGE_WINDOWS = (5, 30, 60, 120, 240)
+
+
+def usage_windows(windows=USAGE_WINDOWS) -> dict:
+    now = datetime.now(timezone.utc)
+    cutoffs = {
+        m: (now - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%S.%f")
+        for m in windows
+    }
+    oldest = min(cutoffs.values())
+    per_window = {
+        m: {"minutes": m, "requests": 0, **{k: 0 for k in TOKEN_KEYS}}
+        for m in windows
+    }
+    smallest = min(windows)
+    consumers = []
+    for db_file in sorted(DATA_DIR.glob("*.db")):
+        name = db_file.stem
+        if not valid_project(name):
+            continue
+        try:
+            with note_conn(name) as conn:
+                rows = conn.execute(
+                    "SELECT r.timestamp AS ts, r.session_id AS session_id,"
+                    f" {TOKEN_COLS}"
+                    " FROM request_logs r WHERE r.timestamp >= ?",
+                    (oldest,),
+                ).fetchall()
+        except sqlite3.Error:
+            continue
+        session_tokens = {}
+        for row in rows:
+            for m in windows:
+                if row["ts"] >= cutoffs[m]:
+                    w = per_window[m]
+                    w["requests"] += 1
+                    for k in TOKEN_KEYS:
+                        w[k] += row[k] or 0
+            if row["ts"] >= cutoffs[smallest]:
+                tok = (row["input_tokens"] or 0) + (row["output_tokens"] or 0)
+                entry = session_tokens.get(row["session_id"])
+                if entry is None:
+                    entry = {"project": name, "session_id": row["session_id"],
+                             "requests": 0, "tokens": 0, **{k: 0 for k in TOKEN_KEYS}}
+                    session_tokens[row["session_id"]] = entry
+                entry["requests"] += 1
+                entry["tokens"] += tok
+                for k in TOKEN_KEYS:
+                    entry[k] += row[k] or 0
+        consumers.extend(session_tokens.values())
+    consumers.sort(key=lambda c: c["tokens"], reverse=True)
+    result = []
+    for m in windows:
+        w = per_window[m]
+        w["tokens"] = w["input_tokens"] + w["output_tokens"]
+        result.append(w)
+    return {"windows": result, "top": consumers[:5]}
 
 
 def has_session_column(conn: sqlite3.Connection) -> bool:
@@ -1437,6 +1505,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     minutes = 5
                 return self.send_json(usage_recent(minutes))
+            if route == "/api/usage_windows":
+                return self.send_json(usage_windows())
             if route == "/api/requests":
                 project = params.get("project", "")
                 if not valid_project(project):
