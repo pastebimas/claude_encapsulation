@@ -6,6 +6,7 @@ const state = {
   projects: [],
   project: null,
   filters: { q: "", model: "", status: "", unread: false },
+  mine: true,
   groupBySession: true,
   requests: [],
   total: 0,
@@ -174,7 +175,8 @@ function filterParams() {
   if (f.model) p.set("model", f.model);
   if (f.status) p.set("status", f.status);
   if (f.unread) p.set("unread", "1");
-  if (state.groupBySession) p.set("view", "sessions");
+  if (state.mine) p.set("mine", "1");
+  else if (state.groupBySession) p.set("view", "sessions");
   return p;
 }
 
@@ -206,11 +208,12 @@ function renderModelOptions(models) {
 function renderRequestList() {
   const list = $("#request-list");
   list.innerHTML = "";
-  const noun = state.groupBySession ? "session" : "request";
+  const noun = state.mine ? "prompt" : state.groupBySession ? "session" : "request";
   $("#result-count").textContent = `${state.total} ${noun}${state.total === 1 ? "" : "s"}`;
   for (const req of state.requests) {
     list.appendChild(requestItem(req));
     if (
+      !state.mine &&
       state.groupBySession &&
       req.session_id &&
       state.expandedSessions.has(req.session_id)
@@ -1090,6 +1093,11 @@ $("#f-unread").onchange = (e) => {
   state.filters.unread = e.target.checked;
   loadRequests(false);
 };
+$("#f-mine").onchange = (e) => {
+  state.mine = e.target.checked;
+  $("#f-group").disabled = state.mine;
+  loadRequests(false);
+};
 $("#f-group").onchange = (e) => {
   state.groupBySession = e.target.checked;
   state.expandedSessions = new Set();
@@ -1180,6 +1188,7 @@ document.querySelectorAll("#detail-tabs .tab").forEach((tab) => {
   };
 });
 
+$("#f-group").disabled = state.mine;
 loadProjects();
 pollRuns();
 pollUsage();
