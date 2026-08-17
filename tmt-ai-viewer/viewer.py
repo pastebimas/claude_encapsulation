@@ -978,25 +978,44 @@ def detect_limit(info: dict):
 
 
 _exec_user = None
+# Compose defaults tmt-ai-code's uid/gid to 1000; matches USER_UID/USER_GID.
+EXEC_USER_FALLBACK = os.getenv("RUN_EXEC_USER_DEFAULT", "1000:1000")
 
 
-def code_container_user() -> str | None:
-    """claude refuses bypassPermissions as root, so exec as the container's
-    own uid:gid (from its USER_UID/USER_GID env)."""
+def code_container_user() -> str:
+    """The uid:gid to exec `claude` as. It refuses bypassPermissions under
+    root, so this must never be root/empty. Resolution order: RUN_EXEC_USER
+    override → the container's USER_UID/USER_GID env → its configured
+    Config.User → a 1000:1000 fallback. Only a positive resolution is cached,
+    so a transient inspect failure can't poison it into permanently running
+    as root."""
     global _exec_user
-    if _exec_user is not None:
-        return _exec_user or None
-    _exec_user = ""
+    if _exec_user:
+        return _exec_user
+
+    override = os.getenv("RUN_EXEC_USER")
+    if override:
+        _exec_user = override
+        return _exec_user
+
     try:
-        info = docker_json(f"/containers/{CODE_CONTAINER}/json")
+        info = docker_json(f"/containers/{CODE_CONTAINER}/json") or {}
+        config = info.get("Config") or {}
         env = dict(
-            item.split("=", 1) for item in info["Config"].get("Env", []) if "=" in item
+            item.split("=", 1) for item in config.get("Env", []) if "=" in item
         )
         if env.get("USER_UID"):
             _exec_user = f"{env['USER_UID']}:{env.get('USER_GID', env['USER_UID'])}"
-    except Exception:
-        pass
-    return _exec_user or None
+            return _exec_user
+        if config.get("User"):
+            _exec_user = config["User"]
+            return _exec_user
+    except Exception as e:
+        print(f"  ! could not resolve {CODE_CONTAINER} uid ({e}); "
+              f"falling back to {EXEC_USER_FALLBACK}", flush=True)
+
+    # Don't cache the fallback — let a later inspect resolve the real uid.
+    return EXEC_USER_FALLBACK
 
 
 def docker_exec_run(
