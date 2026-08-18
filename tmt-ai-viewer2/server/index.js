@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { markStaleOnBoot } from "./db.js";
 import { authMiddleware } from "./auth.js";
 import routes from "./routes.js";
+import { startScheduler } from "./scheduler.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.VIEWER_PORT || "8035", 10);
@@ -29,3 +30,5 @@ if (fs.existsSync(DIST)) {
 }
 
 app.listen(PORT, "0.0.0.0", () => console.log(`tmt-ai-viewer2 on :${PORT}`));
+
+startScheduler();

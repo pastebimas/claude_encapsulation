@@ -16,6 +16,17 @@ export const bus = new EventEmitter();
 bus.setMaxListeners(0);
 
 const RUN_TIMEOUT = parseInt(process.env.RUN_TIMEOUT || "3600", 10) * 1000;
+const RUN_GIT_PULL = (process.env.RUN_GIT_PULL ?? "1") !== "0";
+
+// Best-effort refresh before a run. Every guard makes it a safe no-op rather
+// than a risk: skip non-repos, skip a dirty tree (never touch local work), skip
+// when there is no upstream, and --ff-only can only fast-forward or fail — it
+// never creates a merge commit or a conflict. No git identity needed.
+const GIT_PULL_SCRIPT =
+  'if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo "skipped: not a git repo";' +
+  ' elif [ -n "$(git status --porcelain)" ]; then echo "skipped: uncommitted local changes";' +
+  ' elif ! git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then echo "skipped: no upstream";' +
+  ' else git pull --ff-only 2>&1; fi';
 
 const RUN_PROMPT_SUFFIX =
   process.env.RUN_PROMPT_SUFFIX ??
@@ -39,6 +50,11 @@ const RUN_NO_QUESTIONS =
 const LIMIT_RE = /(?:session|usage|rate)[ _-]?limit|limit reached|hit your .{0,20}limit/i;
 const NOTES_MARKER_RE = /^NOTES:[ \t]*(.*)$/im;
 const QUESTION_MARKER_RE = /^QUESTION:[ \t]*(.*)$/im;
+const PLAN_OPTIONS = ["✓ Approve & run", "Revise the plan"];
+
+// Runs the user asked to stop, by run id. ingest() consults this on finish so a
+// killed run is reported as 'stopped', not 'error'.
+const stopping = new Set();
 const OPTION_RE = /^\s*[-*]\s+(.*\S)\s*$/;
 
 // Parse a trailing `QUESTION:` block into { question, options[] }. Returns null
@@ -76,6 +92,43 @@ export function wrapPrompt(userText, kind) {
 }
 
 const shq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+const squashTitle = (s, n = 80) => {
+  const t = (s || "").replace(/\s+/g, " ").trim();
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
+};
+
+// Unattended (scheduler) runs must not stall on a question overnight.
+const RUN_UNATTENDED =
+  "This task runs unattended — it was dispatched by the night scheduler and no one is" +
+  " watching. Do NOT ask questions: make the most reasonable assumptions, state them" +
+  " briefly, and carry the task through to completion.";
+
+function agentsSuffix(n) {
+  if (!n || n <= 1) return "";
+  return (
+    `You may work autonomously and, where it genuinely helps, fan out into up to ${n} ` +
+    "parallel subagents (or a Workflow) to complete this efficiently."
+  );
+}
+
+// Dispatch a queued scheduled task as its own thread. Reuses the normal run
+// path; only the prompt wrapping differs (unattended + optional subagents).
+export function dispatchScheduled(task) {
+  const parts = [RUN_UNATTENDED];
+  const as = agentsSuffix(task.agents);
+  if (as) parts.push(as);
+  if (RUN_PROMPT_SUFFIX) parts.push(RUN_PROMPT_SUFFIX);
+  const sent = `${parts.join("\n\n")}\n\n${task.prompt}`;
+  const thread = db.createThread(task.project, squashTitle(task.prompt));
+  const turn = db.addTurn(thread.id, task.prompt, sent, null);
+  db.updateScheduled(task.id, {
+    status: "running",
+    thread_id: thread.id,
+    started_at: db.now(),
+  });
+  startRun(thread, turn, "new");
+  return thread;
+}
 
 function emitEvent(ev) {
   const { seq, id } = db.insertEvent(ev);
@@ -116,6 +169,8 @@ function ingestRecord(ctx, obj) {
         if (block.name === "AskUserQuestion") {
           const q = parseAskTool(block.input);
           if (q) ctx.askQuestion = q;
+        } else if (block.name === "ExitPlanMode" || block.name === "exit_plan_mode") {
+          ctx.plan = (block.input && block.input.plan) || "";
         }
         emitEvent({
           ...common,
@@ -197,13 +252,36 @@ export function startRun(thread, turn, kind) {
   return runId;
 }
 
+// Stop a thread's in-flight run. Kills the claude process inside the container
+// by its unique session id; ingest() then finalizes the run as 'stopped'.
+export async function stopThread(threadId) {
+  const thread = db.getThread(threadId);
+  if (!thread) return { ok: false, error: "no such thread" };
+  const run = db.latestRun(threadId);
+  if (run && run.status === "running") stopping.add(run.id);
+  const user = await resolveExecUser();
+  try {
+    await execCollect(CODE_CONTAINER, ["pkill", "-9", "-f", thread.session_id], { user });
+  } catch {
+    /* pkill exits non-zero when nothing matched — fine */
+  }
+  return { ok: true };
+}
+
 async function ingest(thread, turn, runId, kind) {
   const outFile = `/tmp/tmt2-${runId}.jsonl`;
   const errFile = `/tmp/tmt2-${runId}.err`;
   const user = await resolveExecUser();
   const sid = thread.session_id;
 
+  // Pull newest changes first (safe no-op if not fast-forwardable). Never blocks
+  // the run — gitPull swallows its own errors.
+  if (RUN_GIT_PULL) await gitPull(thread, turn.id, runId, user);
+
   const args = ["claude", "-p", "--verbose", "--output-format", "stream-json"];
+  // Plan mode: Claude researches and proposes a plan (via ExitPlanMode) instead
+  // of editing; the dashboard surfaces it for approval.
+  if (thread.plan_mode) args.push("--permission-mode", "plan");
   // Fresh run: assign the session id up front so the thread maps immediately.
   // Resume: --resume alone continues that same session (passing --session-id
   // too is rejected unless --fork-session).
@@ -243,8 +321,9 @@ async function ingest(thread, turn, runId, kind) {
     /* ignore */
   }
 
+  const wasStopped = stopping.delete(runId);
   const ok = exitCode === 0 && ctx.resultSeen;
-  const status = ok ? "done" : "error";
+  const status = wasStopped ? "stopped" : ok ? "done" : "error";
 
   const fields = {
     status,
@@ -252,12 +331,12 @@ async function ingest(thread, turn, runId, kind) {
     finished_at: db.now(),
     stream_note: note,
     result_json: ctx.resultJson || null,
-    error: ok ? null : errText || `exit ${exitCode}` || null,
+    error: status === "error" ? errText || `exit ${exitCode}` || null : null,
   };
 
   // usage-limit detection → mark resumable + schedule.
   const haystack = `${errText}\n${ctx.resultText || ""}`;
-  if (LIMIT_RE.test(haystack)) {
+  if (!wasStopped && LIMIT_RE.test(haystack)) {
     fields.limit_hit = 1;
     fields.resume_at = new Date(
       Date.now() + parseInt(process.env.RUN_LIMIT_RETRY_MINUTES || "30", 10) * 60000
@@ -266,28 +345,58 @@ async function ingest(thread, turn, runId, kind) {
 
   db.updateRun(runId, fields);
 
-  // Did the run pause on a blocking question (marker in the reply, or a real
-  // AskUserQuestion tool call)? If so, park the thread as 'awaiting' so the UI
-  // can surface the question; the user's answer resumes the same session.
-  const question = ok ? parseQuestion(ctx.resultText) || ctx.askQuestion : null;
-  if (question) {
-    db.setThreadAwaiting(thread.id, question);
-  } else {
-    db.setThreadStatus(thread.id, status);
+  // Decide whether the thread should pause for the user. Priority:
+  //   1. a clarifying question (QUESTION marker or AskUserQuestion tool)
+  //   2. a plan awaiting approval (ExitPlanMode, or any plan-mode run's output)
+  // Either parks the thread as 'awaiting'; the answer/approval resumes it.
+  let awaiting = null;
+  if (ok && !wasStopped) {
+    const question = parseQuestion(ctx.resultText) || ctx.askQuestion;
+    if (question) {
+      awaiting = question;
+    } else if (ctx.plan != null) {
+      awaiting = { plan: ctx.plan || ctx.resultText || "", options: PLAN_OPTIONS };
+    } else if (thread.plan_mode) {
+      awaiting = { plan: ctx.resultText || "(no plan text)", options: PLAN_OPTIONS };
+    }
   }
+  if (awaiting) db.setThreadAwaiting(thread.id, awaiting);
+  else db.setThreadStatus(thread.id, status);
 
   // Save any NOTES: trailer to the project notes (proxy's notes table).
   if (ctx.resultText) saveNotes(thread, ctx.resultText);
 
   bus.emit(thread.id, {
     t: "status",
-    status: question ? "awaiting" : status,
+    status: awaiting ? "awaiting" : status,
     run: db.getRun(runId),
   });
-  if (question) bus.emit(thread.id, { t: "awaiting", awaiting: question });
+  if (awaiting) bus.emit(thread.id, { t: "awaiting", awaiting });
   bus.emit(thread.id, { t: "done" });
 
   execCollect(CODE_CONTAINER, ["rm", "-f", outFile, errFile]).catch(() => {});
+}
+
+async function gitPull(thread, turnId, runId, user) {
+  let out = "";
+  try {
+    const r = await execCollect(CODE_CONTAINER, ["sh", "-c", GIT_PULL_SCRIPT], {
+      workdir: `/workspace/${thread.project}`,
+      user,
+      deadlineMs: 60_000,
+    });
+    out = (r.stdout || "").trim() || (r.stderr || "").trim();
+  } catch (e) {
+    out = `error: ${e.message}`;
+  }
+  emitEvent({
+    thread_id: thread.id,
+    turn_id: turnId,
+    run_id: runId,
+    type: "system",
+    name: "git_pull",
+    text: out || "already up to date",
+  });
 }
 
 function saveNotes(thread, resultText) {

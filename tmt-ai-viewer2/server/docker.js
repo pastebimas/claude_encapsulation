@@ -149,13 +149,14 @@ export async function execStream(container, cmd, opts = {}) {
 }
 
 // Run an exec and collect its full output (short-lived commands: cat, ls...).
-export async function execCollect(container, cmd) {
+export async function execCollect(container, cmd, opts = {}) {
   const lines = [];
-  const { stderr } = await execStream(container, cmd, {
+  const { stderr, exitCode } = await execStream(container, cmd, {
+    ...opts,
     onStdoutLine: (l) => lines.push(l),
-    deadlineMs: 30_000,
+    deadlineMs: opts.deadlineMs || 30_000,
   });
-  return { stdout: lines.join("\n"), stderr };
+  return { stdout: lines.join("\n"), stderr, exitCode };
 }
 
 // -- exec user resolution ----------------------------------------------------

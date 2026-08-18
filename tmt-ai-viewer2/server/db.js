@@ -76,14 +76,42 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   created_at TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id          TEXT PRIMARY KEY,
+  project     TEXT NOT NULL,
+  prompt      TEXT NOT NULL,
+  agents      INTEGER NOT NULL DEFAULT 1,
+  status      TEXT NOT NULL DEFAULT 'queued',
+  position    INTEGER NOT NULL DEFAULT 0,
+  thread_id   TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  started_at  TEXT,
+  finished_at TEXT,
+  error       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sched_status ON scheduled_tasks(status, position);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `);
 
-// Additive migration: the pending clarifying question a run paused on, as JSON
-// { question, options[] }. Present only while thread.status = 'awaiting'.
-try {
-  db.exec("ALTER TABLE threads ADD COLUMN awaiting_json TEXT");
-} catch {
-  /* column already exists */
+// Additive migrations (guarded — the columns may already exist).
+// awaiting_json: the pending question/plan a run paused on, as JSON. Present
+//   only while thread.status = 'awaiting'.
+// plan_mode: 1 → dispatch this thread's runs with --permission-mode plan.
+for (const ddl of [
+  "ALTER TABLE threads ADD COLUMN awaiting_json TEXT",
+  "ALTER TABLE threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+]) {
+  try {
+    db.exec(ddl);
+  } catch {
+    /* already applied */
+  }
 }
 
 export const now = () => new Date().toISOString();
@@ -99,19 +127,112 @@ export function markStaleOnBoot() {
   db.prepare(
     "UPDATE threads SET status='stale', updated_at=? WHERE status='running'"
   ).run(ts);
+  // A scheduled task whose dispatched thread can't survive the restart goes back
+  // in the queue so the scheduler can pick it up again.
+  db.prepare(
+    "UPDATE scheduled_tasks SET status='queued', thread_id=NULL, updated_at=? WHERE status='running'"
+  ).run(ts);
+}
+
+// -- scheduled tasks ---------------------------------------------------------
+
+export function listScheduled() {
+  return db
+    .prepare("SELECT * FROM scheduled_tasks ORDER BY position, created_at")
+    .all();
+}
+
+export function getScheduled(id) {
+  return db.prepare("SELECT * FROM scheduled_tasks WHERE id=?").get(id);
+}
+
+export function addScheduled(project, prompt, agents = 1) {
+  const ts = now();
+  const id = uuid();
+  const row = db
+    .prepare("SELECT COALESCE(MAX(position), 0) AS m FROM scheduled_tasks")
+    .get();
+  db.prepare(
+    `INSERT INTO scheduled_tasks (id, project, prompt, agents, status, position, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`
+  ).run(id, project, prompt, Math.max(1, agents | 0), (row.m || 0) + 1, ts, ts);
+  return getScheduled(id);
+}
+
+export function updateScheduled(id, fields) {
+  const keys = Object.keys(fields);
+  if (!keys.length) return;
+  const sets = keys.map((k) => `${k}=?`).join(", ");
+  db.prepare(`UPDATE scheduled_tasks SET ${sets}, updated_at=? WHERE id=?`).run(
+    ...keys.map((k) => fields[k]),
+    now(),
+    id
+  );
+}
+
+export function deleteScheduled(id) {
+  db.prepare("DELETE FROM scheduled_tasks WHERE id=?").run(id);
+}
+
+export function reorderScheduled(ids) {
+  const stmt = db.prepare("UPDATE scheduled_tasks SET position=?, updated_at=? WHERE id=?");
+  const ts = now();
+  const tx = db.transaction((list) => {
+    list.forEach((id, i) => stmt.run(i + 1, ts, id));
+  });
+  tx(ids);
+}
+
+export function nextQueued() {
+  return db
+    .prepare("SELECT * FROM scheduled_tasks WHERE status='queued' ORDER BY position, created_at LIMIT 1")
+    .get();
+}
+
+export function runningScheduledCount() {
+  return db
+    .prepare("SELECT COUNT(*) AS n FROM scheduled_tasks WHERE status='running'")
+    .get().n;
+}
+
+export function runningScheduled() {
+  return db.prepare("SELECT * FROM scheduled_tasks WHERE status='running'").all();
+}
+
+// -- settings (key/value JSON) -----------------------------------------------
+
+export function getSettings(key) {
+  const row = db.prepare("SELECT value FROM settings WHERE key=?").get(key);
+  if (!row) return null;
+  try {
+    return JSON.parse(row.value);
+  } catch {
+    return null;
+  }
+}
+
+export function setSettings(key, obj) {
+  db.prepare(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value`
+  ).run(key, JSON.stringify(obj));
 }
 
 // -- threads / turns ---------------------------------------------------------
 
-export function createThread(project, title) {
+export function createThread(project, title, planMode = false) {
   const ts = now();
   const id = uuid();
   const sessionId = uuid();
   db.prepare(
-    `INSERT INTO threads (id, project, session_id, title, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?)`
-  ).run(id, project, sessionId, title, ts, ts);
+    `INSERT INTO threads (id, project, session_id, title, status, plan_mode, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'running', ?, ?, ?)`
+  ).run(id, project, sessionId, title, planMode ? 1 : 0, ts, ts);
   return getThread(id);
+}
+
+export function setThreadPlanMode(id, on) {
+  db.prepare("UPDATE threads SET plan_mode=? WHERE id=?").run(on ? 1 : 0, id);
 }
 
 export function getThread(id) {
@@ -121,7 +242,7 @@ export function getThread(id) {
 export function listThreads(project) {
   return db
     .prepare(
-      `SELECT id, project, session_id, title, status, created_at, updated_at, read_at,
+      `SELECT id, project, session_id, title, status, plan_mode, created_at, updated_at, read_at,
               (read_at IS NULL OR updated_at > read_at) AS unread
        FROM threads WHERE project=? ORDER BY updated_at DESC`
     )
@@ -220,6 +341,12 @@ export function updateRun(id, fields) {
 
 export function getRun(id) {
   return db.prepare("SELECT * FROM runs WHERE id=?").get(id);
+}
+
+export function latestRun(threadId) {
+  return db
+    .prepare("SELECT * FROM runs WHERE thread_id=? ORDER BY started_at DESC LIMIT 1")
+    .get(threadId);
 }
 
 // -- events ------------------------------------------------------------------

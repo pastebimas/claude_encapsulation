@@ -1,8 +1,9 @@
 import { Router } from "express";
 import * as db from "./db.js";
 import * as auth from "./auth.js";
-import { bus, startRun, wrapPrompt } from "./claude.js";
-import { usageWindows } from "./usage.js";
+import { bus, startRun, wrapPrompt, stopThread, dispatchScheduled } from "./claude.js";
+import { schedulerConfig, saveSchedulerConfig, policyDecision } from "./scheduler.js";
+import { usageWindows, latestLimits } from "./usage.js";
 import { listNotes, addNote, updateNote } from "./projects.js";
 import {
   listWorkspaceProjects,
@@ -82,10 +83,10 @@ router.get("/threads", (req, res) => {
 });
 
 router.post("/threads", (req, res) => {
-  const { project, prompt } = req.body || {};
+  const { project, prompt, plan } = req.body || {};
   if (!project || !prompt || !prompt.trim())
     return res.status(400).json({ error: "project and prompt required" });
-  const thread = db.createThread(project, squash(prompt));
+  const thread = db.createThread(project, squash(prompt), !!plan);
   const sent = wrapPrompt(prompt, "new");
   const turn = db.addTurn(thread.id, prompt, sent, null);
   startRun(thread, turn, "new");
@@ -93,15 +94,24 @@ router.post("/threads", (req, res) => {
 });
 
 router.post("/thread/followup", (req, res) => {
-  const { id, prompt } = req.body || {};
-  const thread = db.getThread(id);
-  if (!thread) return res.status(404).json({ error: "no such thread" });
+  const { id, prompt, plan } = req.body || {};
+  if (!db.getThread(id)) return res.status(404).json({ error: "no such thread" });
   if (!prompt || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
+  // Approving a plan turns plan mode off so the resume run executes; any other
+  // explicit value flips it too. Omitted → keep the thread's current mode.
+  if (plan !== undefined) db.setThreadPlanMode(id, !!plan);
+  const thread = db.getThread(id);
   const sent = wrapPrompt(prompt, "resume");
   const turn = db.addTurn(thread.id, prompt, sent, null);
   db.setThreadStatus(thread.id, "running");
   startRun(thread, turn, "resume");
   res.json({ ok: true, turn_id: turn.id });
+});
+
+router.post("/thread/stop", async (req, res) => {
+  const { id } = req.body || {};
+  if (!id) return res.status(400).json({ error: "id required" });
+  res.json(await stopThread(id));
 });
 
 router.get("/thread", (req, res) => {
@@ -175,5 +185,64 @@ router.get("/thread/stream", (req, res) => {
 
 // -- usage -------------------------------------------------------------------
 router.get("/usage", (req, res) => res.json(usageWindows()));
+router.get("/limits", (req, res) => res.json(latestLimits()));
+
+// -- scheduled tasks ---------------------------------------------------------
+router.get("/scheduled", (req, res) => res.json({ tasks: db.listScheduled() }));
+
+router.post("/scheduled", (req, res) => {
+  const { project, prompt, agents } = req.body || {};
+  if (!project || !prompt || !prompt.trim())
+    return res.status(400).json({ error: "project and prompt required" });
+  const task = db.addScheduled(project, prompt.trim(), parseInt(agents, 10) || 1);
+  res.json({ ok: true, task });
+});
+
+router.patch("/scheduled/:id", (req, res) => {
+  const { prompt, agents, project } = req.body || {};
+  const fields = {};
+  if (prompt !== undefined) fields.prompt = String(prompt);
+  if (project !== undefined) fields.project = String(project);
+  if (agents !== undefined) fields.agents = Math.max(1, parseInt(agents, 10) || 1);
+  if (!Object.keys(fields).length) return res.status(400).json({ error: "nothing to update" });
+  db.updateScheduled(req.params.id, fields);
+  res.json({ ok: true, task: db.getScheduled(req.params.id) });
+});
+
+router.delete("/scheduled/:id", (req, res) => {
+  db.deleteScheduled(req.params.id);
+  res.json({ ok: true });
+});
+
+router.post("/scheduled/reorder", (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids)) return res.status(400).json({ error: "ids[] required" });
+  db.reorderScheduled(ids);
+  res.json({ ok: true });
+});
+
+// Run now — bypasses the window/idle/policy gates.
+router.post("/scheduled/:id/run", (req, res) => {
+  const task = db.getScheduled(req.params.id);
+  if (!task) return res.status(404).json({ error: "no such task" });
+  if (task.status === "running") return res.status(409).json({ error: "already running" });
+  const { agents } = req.body || {};
+  if (agents !== undefined) {
+    task.agents = Math.max(1, parseInt(agents, 10) || 1);
+    db.updateScheduled(task.id, { agents: task.agents });
+  }
+  const thread = dispatchScheduled(task);
+  res.json({ ok: true, thread_id: thread.id });
+});
+
+// -- scheduler config --------------------------------------------------------
+router.get("/scheduler/config", (req, res) => {
+  const cfg = schedulerConfig();
+  res.json({ config: cfg, decision: policyDecision(cfg, latestLimits()) });
+});
+router.put("/scheduler/config", (req, res) => {
+  const cfg = saveSchedulerConfig(req.body || {});
+  res.json({ config: cfg, decision: policyDecision(cfg, latestLimits()) });
+});
 
 export default router;

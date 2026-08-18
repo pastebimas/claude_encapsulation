@@ -276,6 +276,76 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
 }
 .question-card .q-opt:hover { border-color: var(--accent); }
 
+.git-pull { font-family: ui-monospace, monospace; opacity: .85; margin: 2px 0; }
+
+/* -- limit chips in the usage bar -- */
+.lim-chip {
+  padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--bg3); color: var(--muted); white-space: nowrap;
+}
+.lim-chip b { color: var(--text); }
+.lim-chip.lim-warn { border-color: var(--amber); color: var(--amber); }
+.lim-chip.lim-warn b { color: var(--amber); }
+.lim-chip.lim-hot { border-color: var(--red); color: var(--red); }
+.lim-chip.lim-hot b { color: var(--red); }
+
+/* -- collapsed step group -- */
+.steps-group { margin: 4px 0; }
+.steps-group > summary {
+  cursor: pointer; color: var(--muted); font-size: 12px; padding: 3px 0;
+  list-style: none;
+}
+.steps-group > summary:hover { color: var(--text); }
+.steps-group > summary::before { content: "▸ "; }
+.steps-group[open] > summary::before { content: "▾ "; }
+.steps-body {
+  border-left: 2px solid var(--border); margin: 4px 0 6px; padding-left: 10px;
+}
+
+/* -- stop button + plan chip -- */
+.stop-btn { border-color: var(--red); color: var(--red); }
+.stop-btn:hover { background: var(--red); color: #fff; border-color: var(--red); }
+.plan-chip { background: var(--bg3); border: 1px solid var(--accent); color: var(--accent); }
+.plan-toggle {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+  color: var(--muted); cursor: pointer; user-select: none;
+}
+.plan-text {
+  white-space: pre-wrap; max-height: 320px; overflow-y: auto; margin-bottom: 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+}
+.q-opt.approve { border-color: var(--green); color: var(--green); }
+.q-opt.approve:hover { background: var(--green); color: #fff; }
+
+/* -- scheduler panel -- */
+.sched-config {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  margin-bottom: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 8px;
+}
+.sched-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.sched-row > span:first-child { color: var(--muted); min-width: 92px; }
+.sched-row input[type="number"] {
+  width: 56px; background: var(--bg2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 5px; padding: 3px 6px;
+}
+.sched-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+.sched-add select {
+  background: var(--bg2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; padding: 4px 6px;
+}
+.sched-task {
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  margin-bottom: 8px; background: var(--bg);
+}
+.sched-task-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sched-actions { margin-left: auto; display: flex; gap: 8px; }
+.sched-prompt { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+.chip.st-queued { color: var(--muted); }
+.chip.st-running { border-color: var(--green); color: var(--green); }
+.chip.st-done { color: var(--green); }
+.chip.st-failed { border-color: var(--red); color: var(--red); }
+.chip.st-canceled { color: var(--amber); }
+
 .empty { color: var(--muted); padding: 24px 16px; text-align: center; }
 
 /* -- login -- */

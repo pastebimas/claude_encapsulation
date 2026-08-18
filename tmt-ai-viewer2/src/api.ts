@@ -24,14 +24,37 @@ export const api = {
   updateNote: (project: string, id: number, fields: { body?: string; title?: string }) =>
     req("/api/notes/update", { method: "POST", body: JSON.stringify({ project, id, ...fields }) }),
   usage: () => req("/api/usage"),
+  limits: () => req("/api/limits"),
+
+  scheduled: () => req("/api/scheduled"),
+  addScheduled: (project: string, prompt: string, agents = 1) =>
+    req("/api/scheduled", { method: "POST", body: JSON.stringify({ project, prompt, agents }) }),
+  updateScheduled: (id: string, fields: any) =>
+    req(`/api/scheduled/${id}`, { method: "PATCH", body: JSON.stringify(fields) }),
+  deleteScheduled: (id: string) => req(`/api/scheduled/${id}`, { method: "DELETE" }),
+  reorderScheduled: (ids: string[]) =>
+    req("/api/scheduled/reorder", { method: "POST", body: JSON.stringify({ ids }) }),
+  runScheduled: (id: string, agents?: number) =>
+    req(`/api/scheduled/${id}/run`, {
+      method: "POST",
+      body: JSON.stringify(agents === undefined ? {} : { agents }),
+    }),
+  schedulerConfig: () => req("/api/scheduler/config"),
+  saveSchedulerConfig: (patch: any) =>
+    req("/api/scheduler/config", { method: "PUT", body: JSON.stringify(patch) }),
 
   threads: (project: string) => req(`/api/threads?project=${encodeURIComponent(project)}`),
-  newThread: (project: string, prompt: string) =>
-    req("/api/threads", { method: "POST", body: JSON.stringify({ project, prompt }) }),
+  newThread: (project: string, prompt: string, plan = false) =>
+    req("/api/threads", { method: "POST", body: JSON.stringify({ project, prompt, plan }) }),
   thread: (id: string) => req(`/api/thread?id=${encodeURIComponent(id)}`),
   threadRaw: (id: string) => req(`/api/thread/raw?id=${encodeURIComponent(id)}`),
-  followup: (id: string, prompt: string) =>
-    req("/api/thread/followup", { method: "POST", body: JSON.stringify({ id, prompt }) }),
+  followup: (id: string, prompt: string, plan?: boolean) =>
+    req("/api/thread/followup", {
+      method: "POST",
+      body: JSON.stringify(plan === undefined ? { id, prompt } : { id, prompt, plan }),
+    }),
+  stopThread: (id: string) =>
+    req("/api/thread/stop", { method: "POST", body: JSON.stringify({ id }) }),
   events: (id: string, since: number) =>
     req(`/api/thread/events?id=${encodeURIComponent(id)}&since=${since}`),
 };

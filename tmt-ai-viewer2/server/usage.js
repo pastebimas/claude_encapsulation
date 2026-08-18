@@ -3,7 +3,7 @@
 // conversations never touch this.
 import fs from "node:fs";
 import path from "node:path";
-import { projectTokensSince, TOKEN_KEYS } from "./projects.js";
+import { projectTokensSince, latestRateLimit, TOKEN_KEYS } from "./projects.js";
 
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const WINDOWS = [5, 30, 60, 120, 240];
@@ -22,6 +22,23 @@ function dbProjects() {
 
 function isoCutoff(minutes) {
   return new Date(Date.now() - minutes * 60000).toISOString();
+}
+
+// Most recent rate-limit snapshot across every project DB (headers only update
+// when a request flows, so we take the globally newest by timestamp).
+export function latestLimits() {
+  let best = null;
+  for (const p of dbProjects()) {
+    const rl = latestRateLimit(p);
+    if (rl && (!best || rl.timestamp > best.timestamp)) best = rl;
+  }
+  if (!best) return { available: false };
+  return {
+    available: true,
+    as_of: best.timestamp,
+    five_h: best.five_h,
+    seven_d: best.seven_d,
+  };
 }
 
 export function usageWindows() {

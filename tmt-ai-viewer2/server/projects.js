@@ -78,6 +78,43 @@ export function updateNote(project, id, { body = null, title = null }) {
   }
 }
 
+// Newest Anthropic unified rate-limit snapshot from this project's request log.
+// The proxy stores response headers verbatim (rate-limit ones aren't redacted).
+export function latestRateLimit(project) {
+  const db = openProject(project, { readonly: true });
+  if (!db) return null;
+  try {
+    const row = db
+      .prepare(
+        `SELECT timestamp, response_headers FROM request_logs
+          WHERE response_headers LIKE '%unified-7d-reset%'
+          ORDER BY id DESC LIMIT 1`
+      )
+      .get();
+    if (!row) return null;
+    let h;
+    try {
+      h = JSON.parse(row.response_headers);
+    } catch {
+      return null;
+    }
+    const num = (k) => {
+      const v = h[`anthropic-ratelimit-unified-${k}`];
+      return v == null || v === "" ? null : Number(v);
+    };
+    const str = (k) => h[`anthropic-ratelimit-unified-${k}`] ?? null;
+    return {
+      timestamp: row.timestamp,
+      five_h: { utilization: num("5h-utilization"), reset: num("5h-reset"), status: str("5h-status") },
+      seven_d: { utilization: num("7d-utilization"), reset: num("7d-reset"), status: str("7d-status") },
+    };
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
 // token usage expression, mirroring the old viewer's json_extract approach.
 const TOK_FIELDS = [
   ["input_tokens", "input_tokens"],

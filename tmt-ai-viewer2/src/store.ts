@@ -21,11 +21,16 @@ export const useStore = defineStore("main", () => {
   const maxSeq = ref(0);
 
   const usage = ref<any>({ windows: {} });
+  const limits = ref<any>({ available: false });
   const containers = ref<any[]>([]);
   const notes = ref<any[]>([]);
   const context = ref<any>({ files: [] });
 
-  const panel = ref<string | null>(null); // 'notes' | 'context'
+  const scheduled = ref<any[]>([]);
+  const schedulerCfg = ref<any>(null);
+  const schedulerDecision = ref<any>(null);
+
+  const panel = ref<string | null>(null); // 'notes' | 'context' | 'scheduler'
   const detailTab = ref<"conversation" | "raw">("conversation");
   const rawData = ref<any>(null);
 
@@ -97,6 +102,11 @@ export const useStore = defineStore("main", () => {
     } catch {
       /* ignore */
     }
+    try {
+      limits.value = await api.limits();
+    } catch {
+      /* ignore */
+    }
   }
 
   async function selectProject(name: string) {
@@ -132,9 +142,9 @@ export const useStore = defineStore("main", () => {
     }
   }
 
-  async function submit(prompt: string) {
+  async function submit(prompt: string, plan = false) {
     if (!currentProject.value || !prompt.trim()) return;
-    const r = await api.newThread(currentProject.value, prompt.trim());
+    const r = await api.newThread(currentProject.value, prompt.trim(), plan);
     await loadThreads();
     await openThread(r.thread_id);
   }
@@ -190,15 +200,24 @@ export const useStore = defineStore("main", () => {
     }
   }
 
-  async function followup(prompt: string) {
+  async function followup(prompt: string, plan?: boolean) {
     if (!currentThreadId.value || !prompt.trim()) return;
-    await api.followup(currentThreadId.value, prompt.trim());
+    await api.followup(currentThreadId.value, prompt.trim(), plan);
     if (thread.value) {
       thread.value.status = "running";
       thread.value.awaiting = null;
+      if (plan !== undefined) thread.value.plan_mode = plan ? 1 : 0;
     }
     await loadThreads();
     startStream();
+  }
+  // Approve a plan: resume the session with plan mode OFF so it executes.
+  async function approvePlan() {
+    await followup("The plan is approved. Proceed and implement it.", false);
+  }
+  async function stop() {
+    if (!currentThreadId.value) return;
+    await api.stopThread(currentThreadId.value);
   }
 
   async function loadRaw() {
@@ -210,9 +229,52 @@ export const useStore = defineStore("main", () => {
     panel.value = which;
     if (which === "notes") notes.value = (await api.notes(currentProject.value!)).notes;
     if (which === "context") context.value = await api.context(currentProject.value!);
+    if (which === "scheduler") {
+      await loadScheduled();
+      await loadSchedulerConfig();
+    }
   }
   function closePanel() {
     panel.value = null;
+  }
+
+  async function loadScheduled() {
+    scheduled.value = (await api.scheduled()).tasks;
+  }
+  async function loadSchedulerConfig() {
+    const r = await api.schedulerConfig();
+    schedulerCfg.value = r.config;
+    schedulerDecision.value = r.decision;
+  }
+  async function saveSchedulerConfig(patch: any) {
+    const r = await api.saveSchedulerConfig(patch);
+    schedulerCfg.value = r.config;
+    schedulerDecision.value = r.decision;
+  }
+  async function addScheduled(project: string, prompt: string, agents: number) {
+    await api.addScheduled(project, prompt, agents);
+    await loadScheduled();
+  }
+  async function updateScheduled(id: string, fields: any) {
+    await api.updateScheduled(id, fields);
+    await loadScheduled();
+  }
+  async function deleteScheduled(id: string) {
+    await api.deleteScheduled(id);
+    await loadScheduled();
+  }
+  async function reorderScheduled(ids: string[]) {
+    await api.reorderScheduled(ids);
+    await loadScheduled();
+  }
+  async function runScheduled(id: string, agents?: number) {
+    const r = await api.runScheduled(id, agents);
+    await loadScheduled();
+    if (r.thread_id) {
+      panel.value = null;
+      await loadThreads();
+      await openThread(r.thread_id);
+    }
   }
   async function addNote(body: string) {
     await api.addNote(currentProject.value!, body);
@@ -232,11 +294,14 @@ export const useStore = defineStore("main", () => {
   return {
     ready, authEnabled, authed, theme,
     projects, currentProject, threads, currentThreadId,
-    thread, turns, events, usage, containers, notes, context,
+    thread, turns, events, usage, limits, containers, notes, context,
+    scheduled, schedulerCfg, schedulerDecision,
     panel, detailTab, rawData, anyRunning,
     init, doLogin, doLogout, toggleTheme,
     loadProjects, selectProject, loadThreads, loadStatus,
-    submit, openThread, followup, loadRaw,
+    submit, openThread, followup, approvePlan, stop, loadRaw,
     openPanel, closePanel, addNote, updateNote, runNoteLine,
+    loadScheduled, loadSchedulerConfig, saveSchedulerConfig,
+    addScheduled, updateScheduled, deleteScheduled, reorderScheduled, runScheduled,
   };
 });
