@@ -27,19 +27,22 @@ services:
       - tmt-ai-proxy
     restart: unless-stopped
 
-  tmt-ai-viewer:
+  tmt-ai-viewer2:
     build:
-      context: ./tmt-ai-viewer
-    container_name: tmt-ai-viewer
+      context: ./tmt-ai-viewer2
+    container_name: tmt-ai-viewer2
     ports:
-      - 8034:8034
+      - "127.0.0.1:8035:8035"
     volumes:
       - ./data:/data
     environment:
       DOCKER_API: http://tmt-ai-docker-proxy:2375
+      CODE_CONTAINER: tmt-ai-code
+      OWN_COMPOSE_PROJECT: tmt-ai
       VIEWER_PASSWORD: ${VIEWER_PASSWORD:-}
       VIEWER_MAX_ATTEMPTS: ${VIEWER_MAX_ATTEMPTS:-5}
       VIEWER_LOCKOUT_SECONDS: ${VIEWER_LOCKOUT_SECONDS:-300}
+      RUN_TIMEOUT: ${RUN_TIMEOUT:-3600}
     depends_on:
       - tmt-ai-docker-proxy
     restart: unless-stopped
