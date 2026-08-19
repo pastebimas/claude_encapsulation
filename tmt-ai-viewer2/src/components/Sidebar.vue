@@ -12,9 +12,27 @@ const store = useStore();
       </button>
       <button v-if="store.authEnabled" class="btn" @click="store.doLogout()">Logout</button>
     </div>
+    <div class="proj-sort">
+      <button
+        class="seg-btn"
+        :class="{ active: store.projectSort === 'recent' }"
+        title="Most recently active projects first"
+        @click="store.setProjectSort('recent')"
+      >
+        Recent
+      </button>
+      <button
+        class="seg-btn"
+        :class="{ active: store.projectSort === 'alpha' }"
+        title="Sort projects A–Z"
+        @click="store.setProjectSort('alpha')"
+      >
+        A–Z
+      </button>
+    </div>
     <nav class="project-list">
       <button
-        v-for="p in store.projects"
+        v-for="p in store.sortedProjects"
         :key="p.name"
         class="project-item"
         :class="{ active: p.name === store.currentProject }"

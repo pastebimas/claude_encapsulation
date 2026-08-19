@@ -55,6 +55,10 @@ export const api = {
     }),
   stopThread: (id: string) =>
     req("/api/thread/stop", { method: "POST", body: JSON.stringify({ id }) }),
+  markRead: (id: string) =>
+    req("/api/thread/read", { method: "POST", body: JSON.stringify({ id }) }),
+  markUnread: (id: string) =>
+    req("/api/thread/unread", { method: "POST", body: JSON.stringify({ id }) }),
   events: (id: string, since: number) =>
     req(`/api/thread/events?id=${encodeURIComponent(id)}&since=${since}`),
 };

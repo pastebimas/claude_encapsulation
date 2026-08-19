@@ -6,6 +6,7 @@ import { markStaleOnBoot } from "./db.js";
 import { authMiddleware } from "./auth.js";
 import routes from "./routes.js";
 import { startScheduler } from "./scheduler.js";
+import { startTaskApi } from "./taskApi.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.VIEWER_PORT || "8035", 10);
@@ -32,3 +33,6 @@ if (fs.existsSync(DIST)) {
 app.listen(PORT, "0.0.0.0", () => console.log(`tmt-ai-viewer2 on :${PORT}`));
 
 startScheduler();
+
+// Public task-dispatch API on its own port (off unless TASK_API_TOKEN is set).
+startTaskApi();

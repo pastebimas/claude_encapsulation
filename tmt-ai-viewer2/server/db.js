@@ -103,15 +103,28 @@ CREATE TABLE IF NOT EXISTS settings (
 // awaiting_json: the pending question/plan a run paused on, as JSON. Present
 //   only while thread.status = 'awaiting'.
 // plan_mode: 1 → dispatch this thread's runs with --permission-mode plan.
+// ext_task_id / ext_task_source / branch: set when a thread was created by the
+//   external task-dispatch API (taskApi.js) — the caller's task id, where it
+//   came from, and the git branch the work is scoped to.
 for (const ddl of [
   "ALTER TABLE threads ADD COLUMN awaiting_json TEXT",
   "ALTER TABLE threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE threads ADD COLUMN ext_task_id TEXT",
+  "ALTER TABLE threads ADD COLUMN ext_task_source TEXT",
+  "ALTER TABLE threads ADD COLUMN branch TEXT",
 ]) {
   try {
     db.exec(ddl);
   } catch {
     /* already applied */
   }
+}
+try {
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_threads_ext_task ON threads(project, ext_task_id)"
+  );
+} catch {
+  /* column not present yet on a very old db — the ALTERs above create it first */
 }
 
 export const now = () => new Date().toISOString();
@@ -235,6 +248,31 @@ export function setThreadPlanMode(id, on) {
   db.prepare("UPDATE threads SET plan_mode=? WHERE id=?").run(on ? 1 : 0, id);
 }
 
+// Thread created by the external task-dispatch API. Always plan_mode=1 (it must
+// produce a plan for approval before touching the branch) and carries the
+// caller's task id + the git branch the work lives on.
+export function createTaskThread(project, title, { branch, ext_task_id, ext_task_source } = {}) {
+  const ts = now();
+  const id = uuid();
+  const sessionId = uuid();
+  db.prepare(
+    `INSERT INTO threads
+       (id, project, session_id, title, status, plan_mode, ext_task_id, ext_task_source, branch, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'running', 1, ?, ?, ?, ?, ?)`
+  ).run(id, project, sessionId, title, ext_task_id || null, ext_task_source || null, branch || null, ts, ts);
+  return getThread(id);
+}
+
+// Look up a thread previously created for (project, ext_task_id) so a retried
+// webhook is idempotent instead of forking a second branch/thread. Newest first.
+export function findThreadByExtTask(project, extTaskId) {
+  return db
+    .prepare(
+      "SELECT * FROM threads WHERE project=? AND ext_task_id=? ORDER BY created_at DESC LIMIT 1"
+    )
+    .get(project, extTaskId);
+}
+
 export function getThread(id) {
   return db.prepare("SELECT * FROM threads WHERE id=?").get(id);
 }
@@ -285,6 +323,12 @@ export function touchThread(id) {
 
 export function markThreadRead(id) {
   db.prepare("UPDATE threads SET read_at=? WHERE id=?").run(now(), id);
+}
+
+// Manually flag a thread as unread ("come back to this later"). Clearing
+// read_at makes it unread again without touching updated_at.
+export function markThreadUnread(id) {
+  db.prepare("UPDATE threads SET read_at=NULL WHERE id=?").run(id);
 }
 
 export function nextTurnSeq(threadId) {

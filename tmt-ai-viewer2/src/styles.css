@@ -53,6 +53,10 @@ pre, code, .mono {
   color: var(--accent); border-bottom: 1px solid var(--border);
 }
 .side-actions { display: flex; gap: 6px; padding: 8px 10px; flex-wrap: wrap; }
+.proj-sort {
+  display: flex; gap: 0; margin: 2px 10px 6px;
+  border: 1px solid var(--border); border-radius: 6px; overflow: hidden; width: max-content;
+}
 .project-list { overflow-y: auto; flex: 1; padding: 4px 6px; }
 .project-item {
   width: 100%; text-align: left; display: flex; align-items: center; gap: 6px;
@@ -122,10 +126,41 @@ pre, code, .mono {
 }
 .detail-pane { flex: 1; overflow-y: auto; min-width: 0; }
 
+.list-head {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+.sort-seg { display: flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg-btn {
+  padding: 3px 10px; font-size: 12px; cursor: pointer;
+  background: var(--bg); color: var(--muted); border: 0;
+  border-right: 1px solid var(--border);
+}
+.seg-btn:last-child { border-right: 0; }
+.seg-btn.active { background: var(--accent); color: #fff; }
+.unread-filter {
+  margin-left: auto; padding: 3px 10px; font-size: 12px; cursor: pointer;
+  background: var(--bg); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.unread-filter.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.unread-filter:disabled { opacity: .5; cursor: default; }
+
 .thread-item {
   padding: 10px 14px; border-bottom: 1px solid var(--border);
   cursor: pointer; position: relative;
 }
+.thread-item .mark-btn {
+  margin-left: auto; padding: 1px 7px; font-size: 11px; cursor: pointer;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 10px;
+  opacity: 0; transition: opacity .12s;
+}
+.thread-item:hover .mark-btn,
+.thread-item.unread .mark-btn { opacity: 1; }
+.thread-item .mark-btn:hover { color: var(--text); border-color: var(--accent); }
 .thread-item:hover { background: var(--bg2); }
 .thread-item.active { background: var(--bg3); }
 .thread-item.unread .title::before {
@@ -156,9 +191,34 @@ pre, code, .mono {
   font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
   padding: 5px 10px; background: var(--bg2); border-bottom: 1px solid var(--border);
 }
-.msg.user .role { color: var(--green); }
+/* your comments — make them pop so they're easy to scan for */
+.msg.user {
+  border-color: var(--accent);
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg2));
+}
+.msg.user .role {
+  color: #fff; background: var(--accent); border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.msg.user .content { font-weight: 500; }
+
 .msg.assistant .role { color: var(--accent); }
-.msg.result .role { color: var(--amber); }
+
+/* the final answer / result of a turn — green so it stands out as "done".
+   progress-note assistant messages live inside the collapsed fold and stay muted. */
+.msg.result,
+.msg.assistant:not(.progress-note) {
+  border-color: var(--green);
+  border-left: 3px solid var(--green);
+  background: color-mix(in srgb, var(--green) 10%, var(--bg2));
+}
+.msg.result .role,
+.msg.assistant:not(.progress-note) .role {
+  color: #fff; background: var(--green); border-bottom-color: var(--green);
+  font-weight: 600;
+}
+
 .msg .content { padding: 10px; white-space: pre-wrap; word-break: break-word; }
 .msg .content.mono { white-space: pre-wrap; }
 
@@ -263,8 +323,9 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
 
 /* -- awaiting question card -- */
 .question-card {
-  border: 1px solid var(--amber); border-radius: 8px; padding: 12px;
-  margin: 4px 0 12px; background: var(--bg2);
+  border: 1px solid var(--amber); border-left: 3px solid var(--amber);
+  border-radius: 8px; padding: 12px;
+  margin: 4px 0 12px; background: color-mix(in srgb, var(--amber) 12%, var(--bg2));
 }
 .question-card .q-label { color: var(--amber); font-size: 12px; margin-bottom: 6px; }
 .question-card .q-text { font-weight: 600; margin-bottom: 10px; }
@@ -301,6 +362,9 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
 .steps-body {
   border-left: 2px solid var(--border); margin: 4px 0 6px; padding-left: 10px;
 }
+/* intermediate narration inside the fold: de-emphasised vs. the final answer */
+.steps-body .msg.progress-note { border: none; margin: 4px 0; opacity: 0.75; }
+.steps-body .msg.progress-note .content { padding: 4px 0; font-size: 12px; }
 
 /* -- stop button + plan chip -- */
 .stop-btn { border-color: var(--red); color: var(--red); }

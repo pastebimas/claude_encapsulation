@@ -15,6 +15,11 @@ export const useStore = defineStore("main", () => {
   const threads = ref<any[]>([]);
   const currentThreadId = ref<string | null>(null);
 
+  // -- list ordering / filtering (persisted) --
+  const projectSort = ref(localStorage.getItem("tmt2-project-sort") || "recent"); // 'recent' | 'alpha'
+  const threadSort = ref(localStorage.getItem("tmt2-thread-sort") || "recent"); // 'recent' | 'newest' | 'oldest'
+  const unreadOnly = ref(localStorage.getItem("tmt2-unread-only") === "1");
+
   const thread = ref<any>(null);
   const turns = ref<any[]>([]);
   const events = ref<any[]>([]);
@@ -39,6 +44,67 @@ export const useStore = defineStore("main", () => {
   let usageTimer: any = null;
 
   const anyRunning = computed(() => threads.value.some((t) => t.status === "running"));
+
+  const unreadCount = computed(() => threads.value.filter((t) => t.unread).length);
+
+  // Projects (sidebar), ordered by the chosen sort. 'recent' = most recent
+  // activity first (last_ts); 'alpha' = by name. Projects with no activity yet
+  // (mounts without threads) fall to the bottom in 'recent'.
+  const sortedProjects = computed(() => {
+    const list = projects.value.slice();
+    if (projectSort.value === "alpha") {
+      list.sort((a, b) =>
+        (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" })
+      );
+    } else {
+      list.sort((a, b) => (b.last_ts || "").localeCompare(a.last_ts || ""));
+    }
+    return list;
+  });
+
+  // The request list ThreadList renders: filtered by the unread toggle, then
+  // ordered by the chosen sort. 'recent' = most recent response/activity
+  // (updated_at); 'newest'/'oldest' = by creation time. The currently-open
+  // thread is always kept visible so it doesn't vanish when marked read.
+  const sortedThreads = computed(() => {
+    let list = threads.value.slice();
+    if (unreadOnly.value)
+      list = list.filter((t) => t.unread || t.id === currentThreadId.value);
+    if (threadSort.value === "newest") {
+      list.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+    } else if (threadSort.value === "oldest") {
+      list.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""));
+    } else {
+      list.sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+    }
+    return list;
+  });
+
+  function setProjectSort(mode: string) {
+    projectSort.value = mode;
+    localStorage.setItem("tmt2-project-sort", mode);
+  }
+  function setThreadSort(mode: string) {
+    threadSort.value = mode;
+    localStorage.setItem("tmt2-thread-sort", mode);
+  }
+  function toggleUnreadOnly() {
+    unreadOnly.value = !unreadOnly.value;
+    localStorage.setItem("tmt2-unread-only", unreadOnly.value ? "1" : "0");
+  }
+
+  async function markUnread(id: string) {
+    await api.markUnread(id);
+    const t = threads.value.find((x) => x.id === id);
+    if (t) t.unread = 1;
+    await loadProjects();
+  }
+  async function markRead(id: string) {
+    await api.markRead(id);
+    const t = threads.value.find((x) => x.id === id);
+    if (t) t.unread = 0;
+    await loadProjects();
+  }
 
   function parseAwaiting(json: string | null | undefined) {
     if (!json) return null;
@@ -294,10 +360,12 @@ export const useStore = defineStore("main", () => {
   return {
     ready, authEnabled, authed, theme,
     projects, currentProject, threads, currentThreadId,
+    projectSort, threadSort, unreadOnly, sortedProjects, sortedThreads, unreadCount,
     thread, turns, events, usage, limits, containers, notes, context,
     scheduled, schedulerCfg, schedulerDecision,
     panel, detailTab, rawData, anyRunning,
     init, doLogin, doLogout, toggleTheme,
+    setProjectSort, setThreadSort, toggleUnreadOnly, markUnread, markRead,
     loadProjects, selectProject, loadThreads, loadStatus,
     submit, openThread, followup, approvePlan, stop, loadRaw,
     openPanel, closePanel, addNote, updateNote, runNoteLine,

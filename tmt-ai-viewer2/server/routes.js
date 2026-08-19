@@ -149,6 +149,12 @@ router.post("/thread/read", (req, res) => {
   res.json({ ok: true });
 });
 
+router.post("/thread/unread", (req, res) => {
+  const { id } = req.body || {};
+  if (id) db.markThreadUnread(id);
+  res.json({ ok: true });
+});
+
 // -- SSE live event stream ---------------------------------------------------
 router.get("/thread/stream", (req, res) => {
   const id = String(req.query.id || "");

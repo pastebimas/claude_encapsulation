@@ -6,7 +6,8 @@ const store = useStore();
 const followupText = ref("");
 
 // Group events under their turn, preserving order. Each block = one user turn
-// plus everything Claude produced answering it.
+// plus everything Claude produced answering it, folded into: request →
+// collapsed progress → result.
 const blocks = computed(() => {
   const byTurn: Record<string, any[]> = {};
   for (const ev of store.events) {
@@ -15,9 +16,34 @@ const blocks = computed(() => {
   return store.turns.map((t) => {
     const evs = (byTurn[t.id] || []).slice().sort((a, b) => a.seq - b.seq);
     const hasAssistantText = evs.some((e) => e.type === "assistant_text");
-    return { turn: t, events: evs, hasAssistantText };
+    return { turn: t, events: evs, hasAssistantText, layout: layout(evs) };
   });
 });
+
+// Split a turn's events into the collapsed middle (progress) and the final
+// answer. The final answer is the last assistant_text; everything before it —
+// thinking, tool calls/results, intermediate narration, git pull — is progress.
+// With no assistant_text, the result event's text is the answer.
+function layout(evs: any[]) {
+  let lastAssistant = -1;
+  for (let i = 0; i < evs.length; i++) {
+    if (evs[i].type === "assistant_text") lastAssistant = i;
+  }
+  const resultEv = evs.find((e) => e.type === "result") || null;
+  const progress: any[] = [];
+  let finalText: string | null = null;
+  if (lastAssistant >= 0) {
+    finalText = evs[lastAssistant].text;
+    evs.forEach((e, i) => {
+      if (i === lastAssistant || e.type === "result") return;
+      progress.push(e);
+    });
+  } else {
+    finalText = resultEv ? resultEv.text : null;
+    for (const e of evs) if (e.type !== "result") progress.push(e);
+  }
+  return { progress, finalText, resultEv };
+}
 
 function prettyInput(data_json: string) {
   try {
@@ -51,26 +77,8 @@ async function pick(option: string) {
   await store.followup(option);
 }
 
-// Collapse the noisy middle of a turn (thinking + tool calls + results) into a
-// single foldable group, so only the request and Claude's answer stand out.
-const STEP_TYPES = new Set(["thinking", "tool_use", "tool_result"]);
-function segments(events: any[]) {
-  const out: any[] = [];
-  let buf: any[] = [];
-  const flush = () => {
-    if (buf.length) out.push({ kind: "steps", events: buf });
-    buf = [];
-  };
-  for (const ev of events) {
-    if (STEP_TYPES.has(ev.type)) buf.push(ev);
-    else {
-      flush();
-      out.push({ kind: "event", ev });
-    }
-  }
-  flush();
-  return out;
-}
+// Summary label for the collapsed progress fold: the distinct tools it ran, or
+// "thinking" when it was reasoning/narration only.
 function stepsLabel(events: any[]) {
   const tools = events.filter((e) => e.type === "tool_use").map((e) => e.name);
   const uniq = [...new Set(tools)];
@@ -96,9 +104,16 @@ watch(
         <span v-if="store.thread.plan_mode" class="chip plan-chip">◑ plan</span>
         <span class="chip mono">session {{ store.thread.session_id.slice(0, 8) }}</span>
         <button
+          class="btn"
+          style="margin-left: auto"
+          title="Flag this request as unread so you can come back to it later"
+          @click="store.markUnread(store.thread.id)"
+        >
+          ◦ Mark unread
+        </button>
+        <button
           v-if="store.thread.status === 'running'"
           class="btn stop-btn"
-          style="margin-left: auto"
           @click="store.stop()"
         >
           ■ Stop
@@ -123,46 +138,42 @@ watch(
           <div class="content">{{ b.turn.user_text }}</div>
         </div>
 
-        <template v-for="(seg, i) in segments(b.events)" :key="i">
-          <!-- collapsed group of intermediate steps (thinking + tools) -->
-          <details v-if="seg.kind === 'steps'" class="steps-group">
-            <summary>▸ {{ seg.events.length }} step{{ seg.events.length > 1 ? "s" : "" }} · {{ stepsLabel(seg.events) }}</summary>
-            <div class="steps-body">
-              <template v-for="ev in seg.events" :key="ev.id">
-                <details v-if="ev.type === 'thinking'" class="block" data-kind="thinking">
-                  <summary>💭 thinking</summary>
-                  <div class="body">{{ ev.text }}</div>
-                </details>
-                <details v-else-if="ev.type === 'tool_use'" class="block" data-kind="tool_use">
-                  <summary>🔧 {{ ev.name }}</summary>
-                  <pre class="body">{{ prettyInput(ev.data_json) }}</pre>
-                </details>
-                <details v-else-if="ev.type === 'tool_result'" class="block" data-kind="tool_result">
-                  <summary>↩ tool result</summary>
-                  <div class="body mono">{{ ev.text }}</div>
-                </details>
-              </template>
-            </div>
-          </details>
-
-          <!-- always-visible events: request answer, result, git pull -->
-          <template v-else>
-            <div v-if="seg.ev.type === 'system' && seg.ev.name === 'git_pull'" class="tokens git-pull">
-              ⤓ git pull — {{ seg.ev.text }}
-            </div>
-            <div v-else-if="seg.ev.type === 'assistant_text'" class="msg assistant">
-              <div class="role">claude</div>
-              <div class="content">{{ seg.ev.text }}</div>
-            </div>
-            <div v-else-if="seg.ev.type === 'result'">
-              <div v-if="!b.hasAssistantText" class="msg result">
-                <div class="role">result</div>
-                <div class="content">{{ seg.ev.text }}</div>
+        <!-- the whole middle of the turn, folded into one collapsed block -->
+        <details v-if="b.layout.progress.length" class="steps-group">
+          <summary>{{ b.layout.progress.length }} step{{ b.layout.progress.length > 1 ? "s" : "" }} · {{ stepsLabel(b.layout.progress) }}</summary>
+          <div class="steps-body">
+            <template v-for="ev in b.layout.progress" :key="ev.id">
+              <details v-if="ev.type === 'thinking'" class="block" data-kind="thinking">
+                <summary>💭 thinking</summary>
+                <div class="body">{{ ev.text }}</div>
+              </details>
+              <details v-else-if="ev.type === 'tool_use'" class="block" data-kind="tool_use">
+                <summary>🔧 {{ ev.name }}</summary>
+                <pre class="body">{{ prettyInput(ev.data_json) }}</pre>
+              </details>
+              <details v-else-if="ev.type === 'tool_result'" class="block" data-kind="tool_result">
+                <summary>↩ tool result</summary>
+                <div class="body mono">{{ ev.text }}</div>
+              </details>
+              <div v-else-if="ev.type === 'assistant_text'" class="msg assistant progress-note">
+                <div class="role">claude</div>
+                <div class="content">{{ ev.text }}</div>
               </div>
-              <div class="tokens" v-if="tokenLine(seg.ev)">tokens: {{ tokenLine(seg.ev) }}</div>
-            </div>
-          </template>
-        </template>
+              <div v-else-if="ev.type === 'system' && ev.name === 'git_pull'" class="tokens git-pull">
+                ⤓ git pull — {{ ev.text }}
+              </div>
+            </template>
+          </div>
+        </details>
+
+        <!-- the result: final answer + token line -->
+        <div v-if="b.layout.finalText != null" class="msg" :class="b.hasAssistantText ? 'assistant' : 'result'">
+          <div class="role">{{ b.hasAssistantText ? "claude" : "result" }}</div>
+          <div class="content">{{ b.layout.finalText }}</div>
+        </div>
+        <div class="tokens" v-if="b.layout.resultEv && tokenLine(b.layout.resultEv)">
+          tokens: {{ tokenLine(b.layout.resultEv) }}
+        </div>
       </template>
 
       <div v-if="store.thread.status === 'running'" class="tokens">

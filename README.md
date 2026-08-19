@@ -59,6 +59,49 @@ brand-new project:
 docker compose restart tmt-ai-datasette
 ```
 
+## Task-dispatch API
+
+An external system (issue tracker, PM tool) can POST a task and have it
+auto-start a **plan-mode** run scoped to a fresh git branch. It runs on its
+own port (default `8036`), separate from the password-gated dashboard, with
+its own **API token + IP allowlist**. Off unless `TASK_API_TOKEN` is set.
+
+```bash
+curl -X POST http://127.0.0.1:8036/task \
+  -H "Authorization: Bearer $TASK_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"project":"my-app","id":"T-123","name":"Add health endpoint",
+       "description":"Expose GET /health returning 200.",
+       "comments":["must not require auth"]}'
+```
+
+Flow: the project must be currently mounted (`tmt_ai -l`) — if not, the call
+returns `404 project_not_found` and nothing is created. Otherwise it creates
+branch `task/<id>-<name>`, starts a plan-mode run, and returns
+`{thread_id, branch, status:"planning"}`. The plan appears in the dashboard for
+approval; on approval the run implements it and **commits to that branch**
+(local commit only — push from the host). Repeating the same `id` is
+idempotent (returns the existing thread). Poll `GET /task/<id>?project=<p>`.
+
+Environment (in `.env` next to `compose.yml`):
+
+| Var | Purpose |
+| --- | --- |
+| `TASK_API_TOKEN` | **required** bearer token; unset → API disabled |
+| `TASK_API_PORT` | host/container port (default `8036`) |
+| `TASK_API_IP_ALLOWLIST` | comma-separated IPs/CIDRs; empty → token-only |
+| `TASK_API_TRUST_PROXY` | `1` → read client IP from `X-Forwarded-For` |
+| `TASK_API_ONE_AT_A_TIME` | `1` → reject a task while the project has an active run |
+| `TASK_GIT_NAME` / `TASK_GIT_EMAIL` | identity used for the commit (default `tmt-ai`) |
+| `DASHBOARD_URL` | optional; included in responses as a convenience link |
+
+**Exposing it to the public:** the port is published on `127.0.0.1` only — it
+is never on a public interface directly. Put your own TLS tunnel / reverse
+proxy (Cloudflare Tunnel, nginx, Caddy, tailscale serve) in front, forwarding
+to `127.0.0.1:8036`, and set `TASK_API_TRUST_PROXY=1` so the IP allowlist
+matches the real client. The bearer token must only ever travel over that TLS
+layer — never expose the raw port over plain HTTP.
+
 ## Adding a project
 
 Append a line to `compose.override.yml`:

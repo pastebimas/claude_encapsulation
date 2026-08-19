@@ -91,6 +91,52 @@ export function wrapPrompt(userText, kind) {
   return RUN_NO_QUESTIONS ? `${RUN_NO_QUESTIONS}\n\n${body}` : body;
 }
 
+// Build the raw prompt for an external task-dispatch run (taskApi.js). The
+// branch is already created + checked out; this run is in plan mode, so it must
+// propose a plan whose FINAL step commits to that branch. wrapPrompt() then adds
+// the standard non-interactive + NOTES conventions on top.
+export function buildTaskPrompt({ id, name, description, comments, branch }) {
+  const lines = [
+    `You are implementing an external task on the git branch \`${branch}\`, which has already been created and checked out for you in this project.`,
+    "Keep ALL work on that branch: do not switch to, create, or merge other branches, and do not push — commit locally only.",
+    "",
+    `Task ID: ${id}`,
+    `Task name: ${name}`,
+  ];
+  const desc = (description || "").trim();
+  lines.push("", "Task description:", desc || "(none provided)");
+  const list = normalizeComments(comments);
+  if (list.length) {
+    lines.push("", "Additional comments / context:");
+    for (const c of list) lines.push(`- ${c}`);
+  }
+  lines.push(
+    "",
+    "You are in plan mode: research the codebase and propose a plan via ExitPlanMode — do not edit yet.",
+    `Your plan's FINAL step MUST be to commit all changes to branch \`${branch}\` with a message like \`task(${id}): ${name}\`. After I approve, implement the plan and make that commit.`
+  );
+  return lines.join("\n");
+}
+
+// Accept comments as string[] or {author?, body}[]; render each to one line.
+function normalizeComments(comments) {
+  if (!Array.isArray(comments)) return [];
+  const out = [];
+  for (const c of comments) {
+    if (c == null) continue;
+    if (typeof c === "string") {
+      const t = c.trim();
+      if (t) out.push(t.replace(/\s+/g, " "));
+    } else if (typeof c === "object") {
+      const body = String(c.body ?? c.text ?? "").trim();
+      if (!body) continue;
+      const author = String(c.author ?? c.user ?? "").trim();
+      out.push((author ? `${author}: ${body}` : body).replace(/\s+/g, " "));
+    }
+  }
+  return out;
+}
+
 const shq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
 const squashTitle = (s, n = 80) => {
   const t = (s || "").replace(/\s+/g, " ").trim();

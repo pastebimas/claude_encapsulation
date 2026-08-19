@@ -14,11 +14,52 @@ function ago(ts: string) {
 
 <template>
   <div class="list-pane">
+    <div class="list-head">
+      <div class="sort-seg">
+        <button
+          class="seg-btn"
+          :class="{ active: store.threadSort === 'recent' }"
+          title="Most recent response / activity first"
+          @click="store.setThreadSort('recent')"
+        >
+          Recent
+        </button>
+        <button
+          class="seg-btn"
+          :class="{ active: store.threadSort === 'newest' }"
+          title="Newest request first"
+          @click="store.setThreadSort('newest')"
+        >
+          Newest
+        </button>
+        <button
+          class="seg-btn"
+          :class="{ active: store.threadSort === 'oldest' }"
+          title="Oldest request first"
+          @click="store.setThreadSort('oldest')"
+        >
+          Oldest
+        </button>
+      </div>
+      <button
+        class="unread-filter"
+        :class="{ active: store.unreadOnly }"
+        :disabled="!store.unreadCount && !store.unreadOnly"
+        title="Show only requests you haven't read yet"
+        @click="store.toggleUnreadOnly()"
+      >
+        Unread{{ store.unreadCount ? ` (${store.unreadCount})` : "" }}
+      </button>
+    </div>
+
     <div v-if="!store.threads.length" class="empty">
       No requests yet. Type a prompt above to start one.
     </div>
+    <div v-else-if="!store.sortedThreads.length" class="empty">
+      Nothing unread.
+    </div>
     <div
-      v-for="t in store.threads"
+      v-for="t in store.sortedThreads"
       :key="t.id"
       class="thread-item"
       :class="{ active: t.id === store.currentThreadId, unread: t.unread }"
@@ -33,6 +74,13 @@ function ago(ts: string) {
         <span v-else class="dot" :class="t.status"></span>
         <span>{{ t.status }}</span>
         <span>· {{ ago(t.updated_at) }} ago</span>
+        <button
+          class="mark-btn"
+          :title="t.unread ? 'Mark as read' : 'Mark as unread to come back later'"
+          @click.stop="t.unread ? store.markRead(t.id) : store.markUnread(t.id)"
+        >
+          {{ t.unread ? "✓ read" : "◦ unread" }}
+        </button>
       </div>
     </div>
   </div>
