@@ -50,6 +50,13 @@ checklists (toggle todo/doing/done, run a line as its own run), and a run
 can pause to ask a clarifying question you answer inline (it resumes the
 same session).
 
+Every request runs on its own git branch (`claude/<slug>-<id>`); Claude
+commits its changes to that branch locally (it never pushes — the container
+has no push credentials). The **Branches** panel lists each project's
+`claude/*` branches with their unpushed commit counts, a link back to the
+request that made them, and a clickable diff per branch/commit — so you can
+see what still needs pushing. Push them from the host (see below).
+
 Raw SQL: <http://localhost:8001> (Datasette, bound to 127.0.0.1 only).
 Each project gets its own DB in the sidebar. Datasette only scans
 `*.db` files at startup — restart it after creating logs for a
@@ -89,18 +96,76 @@ Environment (in `.env` next to `compose.yml`):
 | --- | --- |
 | `TASK_API_TOKEN` | **required** bearer token; unset → API disabled |
 | `TASK_API_PORT` | host/container port (default `8036`) |
+| `TASK_API_BIND` | host interface to publish on (default `127.0.0.1` = same-server only; `0.0.0.0` or a LAN/tailnet IP to reach it from other machines) |
 | `TASK_API_IP_ALLOWLIST` | comma-separated IPs/CIDRs; empty → token-only |
 | `TASK_API_TRUST_PROXY` | `1` → read client IP from `X-Forwarded-For` |
 | `TASK_API_ONE_AT_A_TIME` | `1` → reject a task while the project has an active run |
 | `TASK_GIT_NAME` / `TASK_GIT_EMAIL` | identity used for the commit (default `tmt-ai`) |
 | `DASHBOARD_URL` | optional; included in responses as a convenience link |
 
-**Exposing it to the public:** the port is published on `127.0.0.1` only — it
-is never on a public interface directly. Put your own TLS tunnel / reverse
-proxy (Cloudflare Tunnel, nginx, Caddy, tailscale serve) in front, forwarding
-to `127.0.0.1:8036`, and set `TASK_API_TRUST_PROXY=1` so the IP allowlist
-matches the real client. The bearer token must only ever travel over that TLS
-layer — never expose the raw port over plain HTTP.
+**Exposing it:** by default the port is published on `127.0.0.1` only, so it is
+reachable **only from the same server** — not from other machines. Two ways to
+go wider:
+
+- **TLS proxy on the same host (recommended):** keep the default bind and put
+  your own TLS tunnel / reverse proxy (Cloudflare Tunnel, nginx, Caddy,
+  `tailscale serve`) in front, forwarding to `127.0.0.1:8036`. Set
+  `TASK_API_TRUST_PROXY=1` so the IP allowlist matches the real client.
+- **Reach it from another machine directly:** set `TASK_API_BIND=0.0.0.0` (any
+  interface) or a specific LAN/tailnet IP. Only do this behind TLS + the
+  allowlist — the bearer token must never travel over plain HTTP.
+
+## Pushing Claude's branches from the host
+
+Runs inside the container commit to a per-request branch named `claude/*` but
+**never push** — the container has no SSH key or git credentials. You push from
+the host, where your normal git auth lives. The **Branches** panel in the
+dashboard shows which branches still have unpushed commits.
+
+Each run works in its own isolated git worktree under the project
+(`.tmt-worktrees/`, added to the repo's local `.git/info/exclude` so it never
+shows up as a change), so two requests against the same project never collide.
+The branches and commits themselves live in the normal repo — worktrees are
+disposable and cleaned up automatically, so you push exactly as usual.
+
+### Push every project at once (recommended)
+
+Run `bin/tmt-ai-push-all` **once, from the folder that holds all your project
+checkouts** (the one directory above each repo). It walks every git repo one
+level down, finds each with unpushed `claude/*` commits, and — after a single
+confirmation — pushes them, printing exactly what went out:
+
+```bash
+cd /host/path/to/projects        # the PARENT dir of your mapped repos
+bin/tmt-ai-push-all --dry-run     # preview across all repos, push nothing
+bin/tmt-ai-push-all               # preview, confirm once, then push
+bin/tmt-ai-push-all --yes         # skip the prompt
+bin/tmt-ai-push-all -r upstream   # different remote (default: origin)
+```
+
+Counts are against local remote-tracking refs, so run `git fetch --all` first
+if they might be stale.
+
+### One project only
+
+```bash
+bin/tmt-ai-push /host/path/to/project        # preview, then confirm
+bin/tmt-ai-push /host/path/to/project --yes   # skip the prompt
+```
+
+### What both do under the hood
+
+Both wrappers push **only** `claude/*` and never force-overwrite:
+
+```bash
+git push origin 'refs/heads/claude/*:refs/heads/claude/*'
+```
+
+The wildcard refspec only maps `refs/heads/claude/*`, so `master` and every
+other branch are left alone, and without `--force` a non-fast-forward is
+rejected rather than clobbered. Commits are authored as
+`TASK_GIT_NAME <TASK_GIT_EMAIL>` (default `tmt-ai <tmt-ai@localhost>`); override
+those env vars if you want your own identity on them.
 
 ## Adding a project
 
@@ -129,6 +194,7 @@ segment (`new-thing`) becomes the DB filename.
 | `claude-config/` | Claude credentials, settings, container-side `CLAUDE.md` (gitignored) |
 | `data/` | one `<project>.db` per mapped project (gitignored) |
 | `bin/tmt_ai` | host launcher script |
+| `bin/tmt-ai-push` / `bin/tmt-ai-push-all` | host helpers to push `claude/*` branches (one project / all projects in a folder) |
 
 Permissions inside the container default to `bypassPermissions` and
 secret files (`.env*`, `*.pem`, `*.key`, etc.) are explicitly denied —
@@ -150,19 +216,3 @@ container, a better default in `settings.json`, a cleaner launcher
 flag, a useful query you'd want as a Datasette canned view — open a PR.
 Keep changes focused; new features should explain the
 problem they solve in the PR description.
-
-
-● Done. Wrote /workspace/pram-fe/nuxt-plan.md.
-
-I had no chat history to recall, so I reconstructed the plan from the actual state on disk —
-the untracked nuxt/ app plus its existing nuxt/docs/ (migration-status, architecture,
-decisions, 4 audits) and nuxt/commit.md. The new file is a self-contained handoff: what the
-project is, phase-by-phase status, everything done (scaffold, SCSS, data/auth proxy layer,
-homepage, SEO/a11y/perf infra, the 2026-08-14 bug fixes), everything left (remaining public
-pages, /ucp user panel, image pipeline, per-page SEO, register/social auth routes,
-slugs/i18n), plus how to run/verify, BE reachability caveats, committing, and a key-paths map.
-
-A fresh agent should start by reading nuxt-plan.md, then nuxt/docs/migration-status.md for the
-authoritative checklist.
-
-

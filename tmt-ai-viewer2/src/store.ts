@@ -35,7 +35,8 @@ export const useStore = defineStore("main", () => {
   const schedulerCfg = ref<any>(null);
   const schedulerDecision = ref<any>(null);
 
-  const panel = ref<string | null>(null); // 'notes' | 'context' | 'scheduler'
+  const panel = ref<string | null>(null); // 'notes' | 'context' | 'scheduler' | 'branches'
+  const gitInfo = ref<any>({ available: false, is_repo: false, branches: [] });
   const detailTab = ref<"conversation" | "raw">("conversation");
   const rawData = ref<any>(null);
 
@@ -208,11 +209,22 @@ export const useStore = defineStore("main", () => {
     }
   }
 
-  async function submit(prompt: string, plan = false) {
+  async function submit(prompt: string, plan = false, model = "") {
     if (!currentProject.value || !prompt.trim()) return;
-    const r = await api.newThread(currentProject.value, prompt.trim(), plan);
+    const r = await api.newThread(currentProject.value, prompt.trim(), plan, model);
     await loadThreads();
     await openThread(r.thread_id);
+  }
+
+  // Load a thread's full state (thread + turns + events) into the open detail
+  // view. Used both when opening a thread and after a follow-up, so the new
+  // user turn is present before its response events stream in.
+  function applyThreadData(r: any) {
+    thread.value = r.thread;
+    thread.value.awaiting = parseAwaiting(r.thread.awaiting_json);
+    turns.value = r.turns;
+    events.value = r.events;
+    maxSeq.value = r.events.length ? r.events[r.events.length - 1].seq : 0;
   }
 
   async function openThread(id: string) {
@@ -221,11 +233,7 @@ export const useStore = defineStore("main", () => {
     rawData.value = null;
     closeStream();
     const r = await api.thread(id);
-    thread.value = r.thread;
-    thread.value.awaiting = parseAwaiting(r.thread.awaiting_json);
-    turns.value = r.turns;
-    events.value = r.events;
-    maxSeq.value = r.events.length ? r.events[r.events.length - 1].seq : 0;
+    applyThreadData(r);
     // mark read locally
     const t = threads.value.find((x) => x.id === id);
     if (t) t.unread = 0;
@@ -266,13 +274,18 @@ export const useStore = defineStore("main", () => {
     }
   }
 
-  async function followup(prompt: string, plan?: boolean) {
+  async function followup(prompt: string, plan?: boolean, model?: string) {
     if (!currentThreadId.value || !prompt.trim()) return;
-    await api.followup(currentThreadId.value, prompt.trim(), plan);
+    const id = currentThreadId.value;
+    await api.followup(id, prompt.trim(), plan, model);
+    // Re-fetch the thread so the new user turn appears immediately. Without this
+    // store.turns stays stale and the streamed response events — grouped by a
+    // turn_id not in store.turns — never render until the thread is reopened.
+    const r = await api.thread(id);
+    applyThreadData(r);
     if (thread.value) {
       thread.value.status = "running";
       thread.value.awaiting = null;
-      if (plan !== undefined) thread.value.plan_mode = plan ? 1 : 0;
     }
     await loadThreads();
     startStream();
@@ -299,9 +312,22 @@ export const useStore = defineStore("main", () => {
       await loadScheduled();
       await loadSchedulerConfig();
     }
+    if (which === "branches") await loadGitBranches();
   }
   function closePanel() {
     panel.value = null;
+  }
+
+  async function loadGitBranches() {
+    if (!currentProject.value) return;
+    try {
+      gitInfo.value = await api.gitBranches(currentProject.value);
+    } catch {
+      gitInfo.value = { available: false, is_repo: false, branches: [] };
+    }
+  }
+  function loadDiff(opts: { branch?: string; commit?: string }) {
+    return api.gitDiff(currentProject.value!, opts);
   }
 
   async function loadScheduled() {
@@ -363,12 +389,12 @@ export const useStore = defineStore("main", () => {
     projectSort, threadSort, unreadOnly, sortedProjects, sortedThreads, unreadCount,
     thread, turns, events, usage, limits, containers, notes, context,
     scheduled, schedulerCfg, schedulerDecision,
-    panel, detailTab, rawData, anyRunning,
+    panel, gitInfo, detailTab, rawData, anyRunning,
     init, doLogin, doLogout, toggleTheme,
     setProjectSort, setThreadSort, toggleUnreadOnly, markUnread, markRead,
     loadProjects, selectProject, loadThreads, loadStatus,
     submit, openThread, followup, approvePlan, stop, loadRaw,
-    openPanel, closePanel, addNote, updateNote, runNoteLine,
+    openPanel, closePanel, loadGitBranches, loadDiff, addNote, updateNote, runNoteLine,
     loadScheduled, loadSchedulerConfig, saveSchedulerConfig,
     addScheduled, updateScheduled, deleteScheduled, reorderScheduled, runScheduled,
   };

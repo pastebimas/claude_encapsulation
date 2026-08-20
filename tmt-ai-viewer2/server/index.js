@@ -7,6 +7,8 @@ import { authMiddleware } from "./auth.js";
 import routes from "./routes.js";
 import { startScheduler } from "./scheduler.js";
 import { startTaskApi } from "./taskApi.js";
+import { pruneWorktrees } from "./git.js";
+import { listWorkspaceProjects, resolveExecUser } from "./docker.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.VIEWER_PORT || "8035", 10);
@@ -36,3 +38,15 @@ startScheduler();
 
 // Public task-dispatch API on its own port (off unless TASK_API_TOKEN is set).
 startTaskApi();
+
+// No runs are active at boot (markStaleOnBoot cleared them): drop any worktrees
+// left over from a crash/restart so stale checkouts don't accumulate. Branches
+// and commits are preserved in each repo's .git.
+(async () => {
+  try {
+    const user = await resolveExecUser();
+    for (const p of await listWorkspaceProjects()) await pruneWorktrees(p, user);
+  } catch (e) {
+    console.error("worktree prune on boot failed:", e.message);
+  }
+})();

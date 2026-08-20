@@ -5,6 +5,24 @@ import { useStore } from "../store";
 const store = useStore();
 const followupText = ref("");
 
+// Model for the next follow-up; seeded from the thread's current model and kept
+// in sync when you switch threads. "" = the CLI default. Sending with a
+// different value switches the model for this and later runs of the session.
+const MODEL_OPTIONS = [
+  { value: "", label: "Default model" },
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "haiku", label: "Haiku" },
+];
+const followupModel = ref("");
+watch(
+  () => store.thread && store.thread.id,
+  () => {
+    followupModel.value = (store.thread && store.thread.model) || "";
+  },
+  { immediate: true }
+);
+
 // Group events under their turn, preserving order. Each block = one user turn
 // plus everything Claude produced answering it, folded into: request →
 // collapsed progress → result.
@@ -65,7 +83,10 @@ function tokenLine(ev: any) {
 async function send() {
   const p = followupText.value;
   followupText.value = "";
-  await store.followup(p);
+  // Only send a model override when it differs from the thread's current one, so
+  // an unchanged picker doesn't need special-casing server-side.
+  const cur = (store.thread && store.thread.model) || "";
+  await store.followup(p, undefined, followupModel.value === cur ? undefined : followupModel.value);
 }
 
 const awaiting = computed(() =>
@@ -102,7 +123,9 @@ watch(
         <span v-else class="dot" :class="store.thread.status"></span>
         <strong>{{ store.thread.status }}</strong>
         <span v-if="store.thread.plan_mode" class="chip plan-chip">◑ plan</span>
+        <span v-if="store.thread.model" class="chip mono">{{ store.thread.model }}</span>
         <span class="chip mono">session {{ store.thread.session_id.slice(0, 8) }}</span>
+        <span v-if="store.thread.branch" class="chip mono" title="git branch this request works on">⎇ {{ store.thread.branch }}</span>
         <button
           class="btn"
           style="margin-left: auto"
@@ -241,6 +264,9 @@ watch(
         <button class="btn primary" :disabled="store.thread.status === 'running' || !followupText.trim()" @click="send">
           ↩ Send follow-up
         </button>
+        <select class="model-select" v-model="followupModel" title="Model for this follow-up (and later runs of this session)">
+          <option v-for="m in MODEL_OPTIONS" :key="m.value" :value="m.value">{{ m.label }}</option>
+        </select>
         <span class="tokens" v-if="store.thread.status === 'running'">wait for the current run to finish</span>
         <span class="tokens" v-else>Ctrl/⌘+Enter</span>
       </div>

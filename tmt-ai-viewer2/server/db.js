@@ -103,12 +103,14 @@ CREATE TABLE IF NOT EXISTS settings (
 // awaiting_json: the pending question/plan a run paused on, as JSON. Present
 //   only while thread.status = 'awaiting'.
 // plan_mode: 1 → dispatch this thread's runs with --permission-mode plan.
+// model: CLI --model value (alias or id) applied to every run; NULL → default.
 // ext_task_id / ext_task_source / branch: set when a thread was created by the
 //   external task-dispatch API (taskApi.js) — the caller's task id, where it
 //   came from, and the git branch the work is scoped to.
 for (const ddl of [
   "ALTER TABLE threads ADD COLUMN awaiting_json TEXT",
   "ALTER TABLE threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE threads ADD COLUMN model TEXT",
   "ALTER TABLE threads ADD COLUMN ext_task_id TEXT",
   "ALTER TABLE threads ADD COLUMN ext_task_source TEXT",
   "ALTER TABLE threads ADD COLUMN branch TEXT",
@@ -233,14 +235,14 @@ export function setSettings(key, obj) {
 
 // -- threads / turns ---------------------------------------------------------
 
-export function createThread(project, title, planMode = false) {
+export function createThread(project, title, planMode = false, model = null) {
   const ts = now();
   const id = uuid();
   const sessionId = uuid();
   db.prepare(
-    `INSERT INTO threads (id, project, session_id, title, status, plan_mode, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?, ?)`
-  ).run(id, project, sessionId, title, planMode ? 1 : 0, ts, ts);
+    `INSERT INTO threads (id, project, session_id, title, status, plan_mode, model, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`
+  ).run(id, project, sessionId, title, planMode ? 1 : 0, model || null, ts, ts);
   return getThread(id);
 }
 
@@ -248,18 +250,28 @@ export function setThreadPlanMode(id, on) {
   db.prepare("UPDATE threads SET plan_mode=? WHERE id=?").run(on ? 1 : 0, id);
 }
 
+export function setThreadModel(id, model) {
+  db.prepare("UPDATE threads SET model=? WHERE id=?").run(model || null, id);
+}
+
+// The git branch this thread's work is scoped to. Pass null to clear it (e.g.
+// when the project turns out not to be a git repo).
+export function setThreadBranch(id, branch) {
+  db.prepare("UPDATE threads SET branch=? WHERE id=?").run(branch || null, id);
+}
+
 // Thread created by the external task-dispatch API. Always plan_mode=1 (it must
 // produce a plan for approval before touching the branch) and carries the
 // caller's task id + the git branch the work lives on.
-export function createTaskThread(project, title, { branch, ext_task_id, ext_task_source } = {}) {
+export function createTaskThread(project, title, { branch, ext_task_id, ext_task_source, model } = {}) {
   const ts = now();
   const id = uuid();
   const sessionId = uuid();
   db.prepare(
     `INSERT INTO threads
-       (id, project, session_id, title, status, plan_mode, ext_task_id, ext_task_source, branch, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', 1, ?, ?, ?, ?, ?)`
-  ).run(id, project, sessionId, title, ext_task_id || null, ext_task_source || null, branch || null, ts, ts);
+       (id, project, session_id, title, status, plan_mode, model, ext_task_id, ext_task_source, branch, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'running', 1, ?, ?, ?, ?, ?, ?)`
+  ).run(id, project, sessionId, title, model || null, ext_task_id || null, ext_task_source || null, branch || null, ts, ts);
   return getThread(id);
 }
 
@@ -280,7 +292,7 @@ export function getThread(id) {
 export function listThreads(project) {
   return db
     .prepare(
-      `SELECT id, project, session_id, title, status, plan_mode, created_at, updated_at, read_at,
+      `SELECT id, project, session_id, title, status, plan_mode, model, branch, created_at, updated_at, read_at,
               (read_at IS NULL OR updated_at > read_at) AS unread
        FROM threads WHERE project=? ORDER BY updated_at DESC`
     )

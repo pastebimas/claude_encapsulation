@@ -44,14 +44,22 @@ export const api = {
     req("/api/scheduler/config", { method: "PUT", body: JSON.stringify(patch) }),
 
   threads: (project: string) => req(`/api/threads?project=${encodeURIComponent(project)}`),
-  newThread: (project: string, prompt: string, plan = false) =>
-    req("/api/threads", { method: "POST", body: JSON.stringify({ project, prompt, plan }) }),
+  newThread: (project: string, prompt: string, plan = false, model = "") =>
+    req("/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ project, prompt, plan, model }),
+    }),
   thread: (id: string) => req(`/api/thread?id=${encodeURIComponent(id)}`),
   threadRaw: (id: string) => req(`/api/thread/raw?id=${encodeURIComponent(id)}`),
-  followup: (id: string, prompt: string, plan?: boolean) =>
+  followup: (id: string, prompt: string, plan?: boolean, model?: string) =>
     req("/api/thread/followup", {
       method: "POST",
-      body: JSON.stringify(plan === undefined ? { id, prompt } : { id, prompt, plan }),
+      body: JSON.stringify({
+        id,
+        prompt,
+        ...(plan === undefined ? {} : { plan }),
+        ...(model === undefined ? {} : { model }),
+      }),
     }),
   stopThread: (id: string) =>
     req("/api/thread/stop", { method: "POST", body: JSON.stringify({ id }) }),
@@ -61,6 +69,16 @@ export const api = {
     req("/api/thread/unread", { method: "POST", body: JSON.stringify({ id }) }),
   events: (id: string, since: number) =>
     req(`/api/thread/events?id=${encodeURIComponent(id)}&since=${since}`),
+
+  gitBranches: (project: string) =>
+    req(`/api/git/branches?project=${encodeURIComponent(project)}`),
+  gitDiff: (project: string, opts: { branch?: string; commit?: string }) =>
+    req(
+      `/api/git/diff?project=${encodeURIComponent(project)}&` +
+        (opts.commit
+          ? `commit=${encodeURIComponent(opts.commit)}`
+          : `branch=${encodeURIComponent(opts.branch || "")}`)
+    ),
 };
 
 export function openStream(id: string, since: number, onMessage: (m: any) => void): EventSource {

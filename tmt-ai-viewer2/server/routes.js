@@ -1,7 +1,7 @@
 import { Router } from "express";
 import * as db from "./db.js";
 import * as auth from "./auth.js";
-import { bus, startRun, wrapPrompt, stopThread, dispatchScheduled } from "./claude.js";
+import { bus, startRun, wrapPrompt, stopThread, dispatchScheduled, normalizeModel } from "./claude.js";
 import { schedulerConfig, saveSchedulerConfig, policyDecision } from "./scheduler.js";
 import { usageWindows, latestLimits } from "./usage.js";
 import { listNotes, addNote, updateNote } from "./projects.js";
@@ -10,6 +10,7 @@ import {
   projectDockerStatus,
   projectContext,
 } from "./docker.js";
+import { branchNameFor, gitBranchInfo, gitDiff } from "./git.js";
 
 const router = Router();
 
@@ -83,25 +84,32 @@ router.get("/threads", (req, res) => {
 });
 
 router.post("/threads", (req, res) => {
-  const { project, prompt, plan } = req.body || {};
+  const { project, prompt, plan, model } = req.body || {};
   if (!project || !prompt || !prompt.trim())
     return res.status(400).json({ error: "project and prompt required" });
-  const thread = db.createThread(project, squash(prompt), !!plan);
-  const sent = wrapPrompt(prompt, "new");
+  const thread = db.createThread(project, squash(prompt), !!plan, normalizeModel(model));
+  // Each request gets its own git branch; ingest() creates/checks it out (and
+  // self-heals to a plain run if the project isn't a git repo).
+  const branch = branchNameFor(thread.title, thread.id);
+  db.setThreadBranch(thread.id, branch);
+  const sent = wrapPrompt(prompt, "new", { branch });
   const turn = db.addTurn(thread.id, prompt, sent, null);
-  startRun(thread, turn, "new");
-  res.json({ thread_id: thread.id });
+  startRun(db.getThread(thread.id), turn, "new");
+  res.json({ thread_id: thread.id, branch });
 });
 
 router.post("/thread/followup", (req, res) => {
-  const { id, prompt, plan } = req.body || {};
+  const { id, prompt, plan, model } = req.body || {};
   if (!db.getThread(id)) return res.status(404).json({ error: "no such thread" });
   if (!prompt || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
   // Approving a plan turns plan mode off so the resume run executes; any other
   // explicit value flips it too. Omitted → keep the thread's current mode.
   if (plan !== undefined) db.setThreadPlanMode(id, !!plan);
+  // A model sent with the follow-up switches the model for this and later runs;
+  // omitted → keep whatever the thread already uses.
+  if (model !== undefined) db.setThreadModel(id, normalizeModel(model));
   const thread = db.getThread(id);
-  const sent = wrapPrompt(prompt, "resume");
+  const sent = wrapPrompt(prompt, "resume", { branch: thread.branch || null });
   const turn = db.addTurn(thread.id, prompt, sent, null);
   db.setThreadStatus(thread.id, "running");
   startRun(thread, turn, "resume");
@@ -187,6 +195,38 @@ router.get("/thread/stream", (req, res) => {
     clearInterval(ping);
     bus.off(id, listener);
   });
+});
+
+// -- git branches (per-project, read-only) -----------------------------------
+// Lists the claude/* branches Claude created for this project, their unpushed
+// commits, and links each back to the request/response thread that made it.
+router.get("/git/branches", async (req, res) => {
+  const project = String(req.query.project || "");
+  if (!project) return res.status(400).json({ error: "project required" });
+  const info = await gitBranchInfo(project);
+  if (info.branches && info.branches.length) {
+    const byBranch = new Map();
+    for (const t of db.listThreads(project)) {
+      if (t.branch && !byBranch.has(t.branch))
+        byBranch.set(t.branch, { thread_id: t.id, title: t.title, status: t.status });
+    }
+    for (const b of info.branches) {
+      const t = byBranch.get(b.name);
+      if (t) Object.assign(b, t);
+    }
+  }
+  res.json(info);
+});
+
+// Diff for a whole branch's unpushed range (?branch=) or a single commit
+// (?commit=). Backs the panel's clickable diff sections.
+router.get("/git/diff", async (req, res) => {
+  const project = String(req.query.project || "");
+  const branch = req.query.branch ? String(req.query.branch) : null;
+  const commit = req.query.commit ? String(req.query.commit) : null;
+  if (!project || (!branch && !commit))
+    return res.status(400).json({ error: "project and branch|commit required" });
+  res.json(await gitDiff(project, { branch, commit }));
 });
 
 // -- usage -------------------------------------------------------------------

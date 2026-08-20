@@ -10,6 +10,7 @@ import {
   resolveExecUser,
 } from "./docker.js";
 import { addNote } from "./projects.js";
+import { ensureWorktree, removeWorktree, branchNameFor, branchPromptNote } from "./git.js";
 import * as db from "./db.js";
 
 export const bus = new EventEmitter();
@@ -83,11 +84,26 @@ function parseAskTool(input) {
   return question ? { question, options } : null;
 }
 
+// Normalize a requested model to a value safe to hand `claude --model`. Accepts
+// the short aliases and any plain model id; anything else (or empty) → null,
+// meaning "use the CLI default". Guards the arg boundary even though it's shell-
+// quoted downstream.
+const MODEL_ALIASES = new Set(["opus", "sonnet", "haiku", "default"]);
+export function normalizeModel(m) {
+  const s = String(m == null ? "" : m).trim();
+  if (!s || s === "default") return null;
+  if (MODEL_ALIASES.has(s.toLowerCase())) return s.toLowerCase();
+  return /^[a-z0-9][a-z0-9.\-:_]{1,80}$/i.test(s) ? s : null;
+}
+
 // The wrapper Claude actually receives. Stored in turns.sent_text (raw tab),
 // never shown as the request itself.
-export function wrapPrompt(userText, kind) {
+export function wrapPrompt(userText, kind, opts = {}) {
   let body = userText;
-  if (kind === "new" && RUN_PROMPT_SUFFIX) body = `${userText}\n\n${RUN_PROMPT_SUFFIX}`;
+  if (kind === "new" && RUN_PROMPT_SUFFIX) body = `${body}\n\n${RUN_PROMPT_SUFFIX}`;
+  // When the run is scoped to a git branch, remind Claude to stay on it and
+  // commit locally (applies to both the first run and any resume/followup).
+  if (opts.branch) body = `${body}\n\n${branchPromptNote(opts.branch)}`;
   return RUN_NO_QUESTIONS ? `${RUN_NO_QUESTIONS}\n\n${body}` : body;
 }
 
@@ -160,19 +176,23 @@ function agentsSuffix(n) {
 // Dispatch a queued scheduled task as its own thread. Reuses the normal run
 // path; only the prompt wrapping differs (unattended + optional subagents).
 export function dispatchScheduled(task) {
+  const thread = db.createThread(task.project, squashTitle(task.prompt));
+  const branch = branchNameFor(thread.title, thread.id);
+  db.setThreadBranch(thread.id, branch);
   const parts = [RUN_UNATTENDED];
   const as = agentsSuffix(task.agents);
   if (as) parts.push(as);
   if (RUN_PROMPT_SUFFIX) parts.push(RUN_PROMPT_SUFFIX);
+  parts.push(branchPromptNote(branch));
   const sent = `${parts.join("\n\n")}\n\n${task.prompt}`;
-  const thread = db.createThread(task.project, squashTitle(task.prompt));
   const turn = db.addTurn(thread.id, task.prompt, sent, null);
   db.updateScheduled(task.id, {
     status: "running",
     thread_id: thread.id,
     started_at: db.now(),
   });
-  startRun(thread, turn, "new");
+  // Re-fetch so the run carries the branch we just stored.
+  startRun(db.getThread(thread.id), turn, "new");
   return thread;
 }
 
@@ -320,11 +340,38 @@ async function ingest(thread, turn, runId, kind) {
   const user = await resolveExecUser();
   const sid = thread.session_id;
 
-  // Pull newest changes first (safe no-op if not fast-forwardable). Never blocks
-  // the run — gitPull swallows its own errors.
-  if (RUN_GIT_PULL) await gitPull(thread, turn.id, runId, user);
+  // Set up an isolated worktree for this run so concurrent same-project runs
+  // never share a checkout. Falls back to the main tree if setup fails; a
+  // non-git project self-heals (clear the branch, run plainly).
+  let workdir = `/workspace/${thread.project}`;
+  if (thread.branch) {
+    const wt = await ensureWorktree(thread.project, thread.branch, user);
+    emitEvent({
+      thread_id: thread.id,
+      turn_id: turn.id,
+      run_id: runId,
+      type: "system",
+      name: "git_branch",
+      text: wt.ok
+        ? `on ${thread.branch} — worktree ${wt.reused ? "reused" : "created"}`
+        : `worktree skipped: ${wt.error}${wt.detail ? ` — ${wt.detail}` : ""} (main tree)`,
+    });
+    if (wt.ok) workdir = wt.path;
+    else if (wt.error === "not_a_git_repo") {
+      db.setThreadBranch(thread.id, null);
+      thread.branch = null;
+    }
+  }
+
+  // Pull newest changes into the run's checkout (safe no-op if not
+  // fast-forwardable). Never blocks the run — gitPull swallows its own errors.
+  if (RUN_GIT_PULL) await gitPull(thread, turn.id, runId, user, workdir);
 
   const args = ["claude", "-p", "--verbose", "--output-format", "stream-json"];
+  // Model override chosen when the request was sent (alias like opus/sonnet/haiku
+  // or a full id). Empty → the CLI's configured default. Applies to every run of
+  // the thread, plan or regular.
+  if (thread.model) args.push("--model", thread.model);
   // Plan mode: Claude researches and proposes a plan (via ExitPlanMode) instead
   // of editing; the dashboard surfaces it for approval.
   if (thread.plan_mode) args.push("--permission-mode", "plan");
@@ -342,7 +389,7 @@ async function ingest(thread, turn, runId, kind) {
   const ctx = { threadId: thread.id, turnId: turn.id, runId, processed: 0, resultSeen: false };
 
   const { exitCode, stderr, note } = await execStream(CODE_CONTAINER, ["sh", "-c", shell], {
-    workdir: `/workspace/${thread.project}`,
+    workdir,
     user,
     onStdoutLine: (l) => handleLine(ctx, l),
     deadlineMs: RUN_TIMEOUT,
@@ -420,14 +467,19 @@ async function ingest(thread, turn, runId, kind) {
   if (awaiting) bus.emit(thread.id, { t: "awaiting", awaiting });
   bus.emit(thread.id, { t: "done" });
 
+  // Reclaim the worktree once the thread is terminal; keep it while awaiting a
+  // follow-up so the resume is instant. Branch + commits remain in .git.
+  if (thread.branch && !awaiting)
+    removeWorktree(thread.project, thread.branch, user).catch(() => {});
+
   execCollect(CODE_CONTAINER, ["rm", "-f", outFile, errFile]).catch(() => {});
 }
 
-async function gitPull(thread, turnId, runId, user) {
+async function gitPull(thread, turnId, runId, user, workdir) {
   let out = "";
   try {
     const r = await execCollect(CODE_CONTAINER, ["sh", "-c", GIT_PULL_SCRIPT], {
-      workdir: `/workspace/${thread.project}`,
+      workdir,
       user,
       deadlineMs: 60_000,
     });

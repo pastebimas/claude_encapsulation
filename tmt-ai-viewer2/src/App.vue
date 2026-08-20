@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from "vue";
+import { onMounted, ref, computed, watch } from "vue";
 import { useStore } from "./store";
 import Login from "./components/Login.vue";
 import Sidebar from "./components/Sidebar.vue";
@@ -10,6 +10,17 @@ const store = useStore();
 const composer = ref("");
 const planMode = ref(false);
 const noteText = ref("");
+
+// Model picker for the composer. "" = the CLI's configured default; the aliases
+// map to the latest of each tier, so they don't go stale. Choice is remembered.
+const MODEL_OPTIONS = [
+  { value: "", label: "Default model" },
+  { value: "opus", label: "Opus" },
+  { value: "sonnet", label: "Sonnet" },
+  { value: "haiku", label: "Haiku" },
+];
+const model = ref(localStorage.getItem("tmt2-model") || "");
+watch(model, (m) => localStorage.setItem("tmt2-model", m));
 
 // -- notes checklist (ported from the old viewer) ----------------------------
 const CHECK_RE = /^(\s*)- \[( |~|x)\] (.*)$/;
@@ -72,7 +83,7 @@ onMounted(() => store.init());
 async function run() {
   const p = composer.value;
   composer.value = "";
-  await store.submit(p, planMode.value);
+  await store.submit(p, planMode.value, model.value);
 }
 
 const win = (m: number) => store.usage.windows?.[m] || { tokens: 0, requests: 0 };
@@ -137,6 +148,61 @@ function moveTask(id: string, dir: number) {
   [ids[i], ids[j]] = [ids[j], ids[i]];
   store.reorderScheduled(ids);
 }
+
+// -- branches panel ----------------------------------------------------------
+const gitOpen = ref<string | null>(null); // expanded branch name
+const gitDiffText = ref("");
+const gitDiffLabel = ref("");
+
+function reldate(iso: string) {
+  if (!iso) return "";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+const pushCmd = computed(
+  () => "git push origin 'refs/heads/claude/*:refs/heads/claude/*'"
+);
+
+// Split a diff into per-line rows so we can color +/- lines.
+const diffRows = computed(() =>
+  (gitDiffText.value || "").split("\n").map((text) => {
+    let cls = "";
+    if (text.startsWith("+") && !text.startsWith("+++")) cls = "diff-add";
+    else if (text.startsWith("-") && !text.startsWith("---")) cls = "diff-del";
+    else if (text.startsWith("@@")) cls = "diff-hunk";
+    return { text, cls };
+  })
+);
+
+async function toggleBranch(b: any) {
+  if (gitOpen.value === b.name) {
+    gitOpen.value = null;
+    return;
+  }
+  gitOpen.value = b.name;
+  gitDiffLabel.value =
+    b.unpushed > 0
+      ? `unpushed diff · ${b.unpushed} commit${b.unpushed > 1 ? "s" : ""}`
+      : "nothing unpushed";
+  gitDiffText.value = "loading…";
+  const r = await store.loadDiff({ branch: b.name });
+  gitDiffText.value = r.diff || "(no changes)";
+}
+async function showCommit(sha: string) {
+  gitDiffLabel.value = `commit ${sha}`;
+  gitDiffText.value = "loading…";
+  const r = await store.loadDiff({ commit: sha });
+  gitDiffText.value = r.diff || "(no changes)";
+}
+function openReq(b: any) {
+  if (!b.thread_id) return;
+  store.openThread(b.thread_id);
+  store.closePanel();
+}
 </script>
 
 <template>
@@ -187,6 +253,7 @@ function moveTask(id: string, dir: number) {
         </div>
         <div class="header-actions">
           <button class="btn" @click="store.openPanel('notes')">Notes</button>
+          <button class="btn" @click="store.openPanel('branches')">Branches</button>
           <button class="btn" @click="store.openPanel('scheduler')">Scheduler</button>
           <button class="btn" @click="store.openPanel('context')">CLAUDE.md</button>
           <button class="btn" @click="store.loadThreads(); store.loadStatus()">Refresh</button>
@@ -205,6 +272,9 @@ function moveTask(id: string, dir: number) {
           <button class="btn primary" :disabled="!composer.trim()" @click="run">
             {{ planMode ? "◑ Plan" : "▶ Run" }}
           </button>
+          <select class="model-select" v-model="model" title="Which Claude model to run this request with">
+            <option v-for="m in MODEL_OPTIONS" :key="m.value" :value="m.value">{{ m.label }}</option>
+          </select>
           <label class="plan-toggle" title="Research and propose a plan first; you approve it before anything runs">
             <input type="checkbox" v-model="planMode" />
             Plan mode
@@ -231,7 +301,7 @@ function moveTask(id: string, dir: number) {
       <div class="slideover">
         <header>
           <h3>
-            {{ store.panel === "notes" ? "Notes" : store.panel === "scheduler" ? "Scheduler" : "Context" }}
+            {{ store.panel === "notes" ? "Notes" : store.panel === "scheduler" ? "Scheduler" : store.panel === "branches" ? "Branches" : "Context" }}
             <template v-if="store.panel !== 'scheduler'"> — {{ store.currentProject }}</template>
           </h3>
           <button class="btn" style="margin-left: auto" @click="store.closePanel()">Close</button>
@@ -385,6 +455,78 @@ function moveTask(id: string, dir: number) {
             <div class="sched-prompt">{{ t.prompt }}</div>
             <div v-if="t.error" class="tokens" style="color: var(--red)">{{ t.error }}</div>
           </div>
+        </div>
+
+        <div class="so-body" v-else-if="store.panel === 'branches'">
+          <div v-if="!store.gitInfo.is_repo" class="empty">
+            {{ store.gitInfo.available === false ? "Could not read git." : "Not a git repository." }}
+          </div>
+          <template v-else>
+            <div v-if="store.gitInfo.dirty" class="dirty-banner">
+              ⚠ {{ store.gitInfo.dirty }} uncommitted change{{ store.gitInfo.dirty > 1 ? "s" : "" }}
+              in the working tree (current branch: <span class="mono">{{ store.gitInfo.current }}</span>)
+            </div>
+            <div class="push-hint">
+              <div class="tokens" style="margin:0 0 4px">Push all Claude branches from the host:</div>
+              <pre class="mono push-cmd">{{ pushCmd }}</pre>
+            </div>
+
+            <div v-if="!store.gitInfo.branches.length" class="empty">
+              No claude/* branches yet.
+            </div>
+
+            <div v-for="b in store.gitInfo.branches" :key="b.name" class="branch-card">
+              <div class="branch-head" @click="toggleBranch(b)">
+                <span class="branch-caret">{{ gitOpen === b.name ? "▾" : "▸" }}</span>
+                <span class="mono branch-name">{{ b.name }}</span>
+                <span v-if="b.name === store.gitInfo.current" class="chip cur-chip">current</span>
+                <span
+                  class="chip"
+                  :class="b.unpushed > 0 ? 'unpushed-yes' : 'unpushed-no'"
+                  :title="b.unpushed > 0 ? 'commits not on any remote' : 'nothing to push'"
+                >
+                  {{ b.unpushed > 0 ? `↑ ${b.unpushed} to push` : "✓ pushed" }}
+                </span>
+                <span class="branch-actions">
+                  <button
+                    v-if="b.thread_id"
+                    class="n-linkbtn"
+                    title="open the request/response that created this branch"
+                    @click.stop="openReq(b)"
+                  >
+                    open request →
+                  </button>
+                </span>
+              </div>
+              <div v-if="b.last" class="branch-last tokens">
+                {{ b.last.sha }} · {{ b.last.subject }} · {{ reldate(b.last.date) }}
+              </div>
+
+              <div v-if="gitOpen === b.name" class="branch-body">
+                <div v-if="b.commits && b.commits.length" class="commit-list">
+                  <div class="tokens" style="margin:0 0 2px">Unpushed commits (click to view):</div>
+                  <button
+                    v-for="c in b.commits"
+                    :key="c.sha"
+                    class="commit-row"
+                    @click="showCommit(c.sha)"
+                  >
+                    <span class="mono">{{ c.sha }}</span>
+                    <span class="commit-subj">{{ c.subject }}</span>
+                    <span class="tokens" style="margin:0">{{ reldate(c.date) }}</span>
+                  </button>
+                </div>
+                <div class="diff-label tokens">{{ gitDiffLabel }}</div>
+                <pre class="diff"><span
+                  v-for="(row, i) in diffRows"
+                  :key="i"
+                  class="dl"
+                  :class="row.cls"
+                >{{ row.text }}
+</span></pre>
+              </div>
+            </div>
+          </template>
         </div>
 
         <div class="so-body" v-else>

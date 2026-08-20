@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# tmt-ai-push — push the claude/* branches Claude created in a project to its
+# remote, from the host (the container has no push credentials). Only touches
+# claude/*; never force-pushes; never touches master or any other branch.
+#
+# Usage:
+#   tmt-ai-push <project-dir>          # preview the push, then confirm
+#   tmt-ai-push <project-dir> --yes    # skip the confirmation
+#   tmt-ai-push <project-dir> -r <remote>   # remote (default: origin)
+#
+set -euo pipefail
+
+REMOTE=origin
+ASSUME_YES=0
+DIR=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--yes) ASSUME_YES=1; shift ;;
+        -r|--remote) REMOTE="${2:?--remote needs a value}"; shift 2 ;;
+        -h|--help)
+            grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,12p'
+            exit 0 ;;
+        -*) echo "unknown option: $1" >&2; exit 2 ;;
+        *) DIR="$1"; shift ;;
+    esac
+done
+
+[ -n "$DIR" ] || { echo "usage: tmt-ai-push <project-dir> [--yes] [-r remote]" >&2; exit 2; }
+[ -d "$DIR/.git" ] || git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || { echo "not a git repo: $DIR" >&2; exit 1; }
+
+REFSPEC='refs/heads/claude/*:refs/heads/claude/*'
+
+mapfile -t BRANCHES < <(git -C "$DIR" for-each-ref --format='%(refname:short)' 'refs/heads/claude/')
+if [ "${#BRANCHES[@]}" -eq 0 ]; then
+    echo "no claude/* branches in $DIR — nothing to push."
+    exit 0
+fi
+
+echo "claude/* branches in $DIR:"
+for b in "${BRANCHES[@]}"; do
+    ahead="$(git -C "$DIR" rev-list --count "$b" --not --remotes 2>/dev/null || echo '?')"
+    echo "  $b  (${ahead} unpushed)"
+done
+echo
+echo "Dry run against '$REMOTE' (non-force, claude/* only):"
+git -C "$DIR" push --dry-run "$REMOTE" "$REFSPEC" || true
+echo
+
+if [ "$ASSUME_YES" -ne 1 ]; then
+    read -r -p "Push these to '$REMOTE'? [y/N] " reply
+    case "$reply" in y|Y|yes|YES) ;; *) echo "aborted."; exit 0 ;; esac
+fi
+
+git -C "$DIR" push "$REMOTE" "$REFSPEC"
+echo "done."

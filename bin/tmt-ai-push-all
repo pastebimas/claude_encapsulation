@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#
+# tmt-ai-push-all — from a projects directory, push every unpushed claude/*
+# branch of every git repo one level down, and print exactly what was pushed
+# so you can review it. Host-side helper: the container has no push credentials.
+#
+# Only touches claude/*; never force-pushes; never touches master or any other
+# branch. A diverged branch is rejected, not overwritten.
+#
+# Usage:
+#   tmt-ai-push-all                 # scan ./*, preview, confirm, then push
+#   tmt-ai-push-all <dir>           # scan <dir>/* instead of the cwd
+#   tmt-ai-push-all --yes           # skip the confirmation
+#   tmt-ai-push-all --dry-run       # show what would be pushed, push nothing
+#   tmt-ai-push-all -r <remote>     # remote name (default: origin)
+#
+# "Unpushed" is counted against local remote-tracking refs, so run
+# `git fetch --all` first if those might be stale.
+#
+set -euo pipefail
+shopt -s nullglob
+
+REMOTE=origin
+ASSUME_YES=0
+DRY=0
+ROOT="."
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--yes) ASSUME_YES=1; shift ;;
+        -n|--dry-run) DRY=1; shift ;;
+        -r|--remote) REMOTE="${2:?--remote needs a value}"; shift 2 ;;
+        -h|--help)
+            grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,18p'
+            exit 0 ;;
+        -*) echo "unknown option: $1" >&2; exit 2 ;;
+        *) ROOT="$1"; shift ;;
+    esac
+done
+
+[ -d "$ROOT" ] || { echo "not a directory: $ROOT" >&2; exit 1; }
+
+# Build the plan: every claude/* branch with commits not on "$REMOTE".
+declare -a P_REPO P_BRANCH P_AHEAD
+for d in "$ROOT"/*/; do
+    d="${d%/}"
+    git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || continue
+    git -C "$d" remote | grep -qx "$REMOTE" || continue   # skip repos without this remote
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        ahead="$(git -C "$d" rev-list --count "$b" --not --remotes="$REMOTE" 2>/dev/null || echo 0)"
+        [ "$ahead" -gt 0 ] 2>/dev/null || continue
+        P_REPO+=("$d"); P_BRANCH+=("$b"); P_AHEAD+=("$ahead")
+    done < <(git -C "$d" for-each-ref --format='%(refname:short)' refs/heads/claude/ 2>/dev/null)
+done
+
+if [ "${#P_REPO[@]}" -eq 0 ]; then
+    echo "No unpushed claude/* branches under $ROOT (remote '$REMOTE'). Nothing to do."
+    exit 0
+fi
+
+echo "Unpushed claude/* branches under $(cd "$ROOT" && pwd) → '$REMOTE':"
+echo
+last=""
+for i in "${!P_REPO[@]}"; do
+    r="${P_REPO[$i]}"; b="${P_BRANCH[$i]}"; a="${P_AHEAD[$i]}"
+    [ "$r" = "$last" ] || { echo "  ${r##*/}/"; last="$r"; }
+    echo "    $b  ($a unpushed)"
+    git -C "$r" log --format='        %h %s' "$b" --not --remotes="$REMOTE" 2>/dev/null | head -n 10
+done
+echo
+
+if [ "$DRY" -eq 1 ]; then
+    echo "[dry-run] would push the above. Re-run without --dry-run to push."
+    exit 0
+fi
+
+if [ "$ASSUME_YES" -ne 1 ]; then
+    read -r -p "Push all of these to '$REMOTE'? [y/N] " reply
+    case "$reply" in y|Y|yes|YES) ;; *) echo "aborted."; exit 0 ;; esac
+fi
+
+echo
+pushed=0; failed=0
+declare -A DONE_REPO
+for i in "${!P_REPO[@]}"; do
+    r="${P_REPO[$i]}"; b="${P_BRANCH[$i]}"
+    printf '== %s : %s ==\n' "${r##*/}" "$b"
+    if git -C "$r" push "$REMOTE" "refs/heads/$b:refs/heads/$b"; then
+        pushed=$((pushed + 1)); DONE_REPO["$r"]=1
+    else
+        echo "  !! push failed (diverged? — not force-pushing)"
+        failed=$((failed + 1))
+    fi
+    echo
+done
+
+echo "Pushed $pushed branch(es) across ${#DONE_REPO[@]} repo(s); $failed failed."
+[ "$failed" -eq 0 ]

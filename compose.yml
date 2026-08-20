@@ -33,7 +33,7 @@ services:
     container_name: tmt-ai-viewer2
     ports:
       - "8035:8035"
-      - "127.0.0.1:${TASK_API_PORT:-8036}:8036"
+      - "${TASK_API_BIND:-127.0.0.1}:${TASK_API_PORT:-8036}:8036"
     volumes:
       - ./data:/data
     environment:

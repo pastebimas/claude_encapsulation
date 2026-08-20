@@ -11,20 +11,14 @@
 import express from "express";
 import crypto from "node:crypto";
 import * as db from "./db.js";
-import { startRun, wrapPrompt, buildTaskPrompt } from "./claude.js";
-import {
-  CODE_CONTAINER,
-  execCollect,
-  resolveExecUser,
-  listWorkspaceProjects,
-} from "./docker.js";
+import { startRun, wrapPrompt, buildTaskPrompt, normalizeModel } from "./claude.js";
+import { resolveExecUser, listWorkspaceProjects } from "./docker.js";
+import { slug, ensureBranchRef } from "./git.js";
 
 const PORT = parseInt(process.env.TASK_API_PORT || "8036", 10);
 const TOKEN = process.env.TASK_API_TOKEN || "";
 const TRUST_PROXY = (process.env.TASK_API_TRUST_PROXY || "") === "1";
 const ALLOWLIST = parseAllowlist(process.env.TASK_API_IP_ALLOWLIST || "");
-const GIT_NAME = process.env.TASK_GIT_NAME || "tmt-ai";
-const GIT_EMAIL = process.env.TASK_GIT_EMAIL || "tmt-ai@localhost";
 const DASHBOARD_URL = (process.env.DASHBOARD_URL || "").replace(/\/+$/, "");
 const ONE_AT_A_TIME = (process.env.TASK_API_ONE_AT_A_TIME || "") === "1";
 const MAX_ATTEMPTS = parseInt(process.env.TASK_API_MAX_ATTEMPTS || "10", 10);
@@ -132,53 +126,6 @@ function auth(req, res, next) {
   return res.status(401).json({ error: "unauthorized" });
 }
 
-// -- branch naming -----------------------------------------------------------
-
-function slug(s, max = 60) {
-  const out = String(s || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^[-._]+|[-._]+$/g, "")
-    .slice(0, max)
-    .replace(/[-._]+$/g, "");
-  return out || "x";
-}
-
-// -- git (inside tmt-ai-code) ------------------------------------------------
-
-function git(project, args, user) {
-  return execCollect(CODE_CONTAINER, ["git", "-C", `/workspace/${project}`, ...args], {
-    user,
-    deadlineMs: 30_000,
-  });
-}
-
-// Confirm repo, set a local bot identity if none (needed for the later commit),
-// then create/switch to the branch. Returns { ok, error } — never throws.
-async function prepareBranch(project, branch, user) {
-  try {
-    const repo = await git(project, ["rev-parse", "--is-inside-work-tree"], user);
-    if (repo.exitCode !== 0 || repo.stdout.trim() !== "true")
-      return { ok: false, code: 422, error: "not_a_git_repo" };
-
-    const email = (await git(project, ["config", "--get", "user.email"], user)).stdout.trim();
-    if (!email) await git(project, ["config", "user.email", GIT_EMAIL], user);
-    const name = (await git(project, ["config", "--get", "user.name"], user)).stdout.trim();
-    if (!name) await git(project, ["config", "user.name", GIT_NAME], user);
-
-    const exists =
-      (await git(project, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], user))
-        .exitCode === 0;
-    const co = await git(project, exists ? ["checkout", branch] : ["checkout", "-b", branch], user);
-    if (co.exitCode !== 0)
-      return { ok: false, code: 500, error: "branch_failed", detail: (co.stderr || "").trim() };
-    return { ok: true, reused: exists };
-  } catch (e) {
-    return { ok: false, code: 500, error: "git_error", detail: e.message };
-  }
-}
-
 // -- status projection -------------------------------------------------------
 
 function mapStatus(thread) {
@@ -250,7 +197,7 @@ function buildApp() {
 
     const branch = `task/${slug(id, 40)}-${slug(name, 60)}`;
     const user = await resolveExecUser();
-    const prep = await prepareBranch(project, branch, user);
+    const prep = await ensureBranchRef(project, branch, user);
     if (!prep.ok)
       return res.status(prep.code).json({ error: prep.error, detail: prep.detail, branch });
 
@@ -259,6 +206,7 @@ function buildApp() {
       branch,
       ext_task_id: id,
       ext_task_source: str(body.source) || "api",
+      model: normalizeModel(body.model),
     });
     const turn = db.addTurn(thread.id, raw, wrapPrompt(raw, "new"), null);
     startRun(thread, turn, "new");
