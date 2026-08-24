@@ -12,6 +12,13 @@ const store = useStore();
       </button>
       <button v-if="store.authEnabled" class="btn" @click="store.doLogout()">Logout</button>
     </div>
+    <button
+      class="btn all-branches-btn"
+      title="Unpushed claude/* work across every project"
+      @click="store.openAllBranches()"
+    >
+      ⎇ All branches
+    </button>
     <div class="proj-sort">
       <button
         class="seg-btn"

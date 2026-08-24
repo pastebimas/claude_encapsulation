@@ -343,6 +343,17 @@ export const useStore = defineStore("main", () => {
     gitScope.value = scope;
     await (scope === "all" ? loadAllGitBranches() : loadGitBranches());
   }
+  // Global entry point: open Branches straight into the all-projects view,
+  // usable with no project selected.
+  async function openAllBranches() {
+    gitScope.value = "all";
+    await openPanel("branches");
+  }
+  // Per-project header entry: always open scoped to the current project.
+  async function openProjectBranches() {
+    gitScope.value = "project";
+    await openPanel("branches");
+  }
   // project is required in all-projects mode; defaults to the open project.
   function loadDiff(opts: { branch?: string; commit?: string }, project?: string) {
     return api.gitDiff(project || currentProject.value!, opts);
@@ -412,8 +423,8 @@ export const useStore = defineStore("main", () => {
     setProjectSort, setThreadSort, toggleUnreadOnly, markUnread, markRead,
     loadProjects, selectProject, loadThreads, loadStatus,
     submit, openThread, followup, approvePlan, stop, loadRaw,
-    openPanel, closePanel, loadGitBranches, loadAllGitBranches, setGitScope, loadDiff,
-    addNote, updateNote, runNoteLine,
+    openPanel, closePanel, loadGitBranches, loadAllGitBranches, setGitScope,
+    openAllBranches, openProjectBranches, loadDiff, addNote, updateNote, runNoteLine,
     loadScheduled, loadSchedulerConfig, saveSchedulerConfig,
     addScheduled, updateScheduled, deleteScheduled, reorderScheduled, runScheduled,
   };

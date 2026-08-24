@@ -283,7 +283,7 @@ async function openReq(b: any, project = store.currentProject) {
         </div>
         <div class="header-actions">
           <button class="btn" @click="store.openPanel('notes')">Notes</button>
-          <button class="btn" @click="store.openPanel('branches')">Branches</button>
+          <button class="btn" @click="store.openProjectBranches()">Branches</button>
           <button class="btn" @click="store.openPanel('scheduler')">Scheduler</button>
           <button class="btn" @click="store.openPanel('context')">CLAUDE.md</button>
           <button class="btn" @click="store.loadThreads(); store.loadStatus()">Refresh</button>
@@ -492,8 +492,9 @@ async function openReq(b: any, project = store.currentProject) {
             <button
               class="seg-btn"
               :class="{ active: store.gitScope === 'project' }"
-              title="claude/* branches in the open project"
-              @click="store.setGitScope('project')"
+              :disabled="!store.currentProject"
+              :title="store.currentProject ? 'claude/* branches in the open project' : 'Select a project first'"
+              @click="store.currentProject && store.setGitScope('project')"
             >
               This project
             </button>
