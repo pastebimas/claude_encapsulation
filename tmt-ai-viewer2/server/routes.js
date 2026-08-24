@@ -200,22 +200,57 @@ router.get("/thread/stream", (req, res) => {
 // -- git branches (per-project, read-only) -----------------------------------
 // Lists the claude/* branches Claude created for this project, their unpushed
 // commits, and links each back to the request/response thread that made it.
+
+// Link each branch back to the thread that created it (mutates info in place).
+function attachThreads(project, info) {
+  if (!info.branches || !info.branches.length) return info;
+  const byBranch = new Map();
+  for (const t of db.listThreads(project)) {
+    if (t.branch && !byBranch.has(t.branch))
+      byBranch.set(t.branch, { thread_id: t.id, title: t.title, status: t.status });
+  }
+  for (const b of info.branches) {
+    const t = byBranch.get(b.name);
+    if (t) Object.assign(b, t);
+  }
+  return info;
+}
+
 router.get("/git/branches", async (req, res) => {
   const project = String(req.query.project || "");
   if (!project) return res.status(400).json({ error: "project required" });
-  const info = await gitBranchInfo(project);
-  if (info.branches && info.branches.length) {
-    const byBranch = new Map();
-    for (const t of db.listThreads(project)) {
-      if (t.branch && !byBranch.has(t.branch))
-        byBranch.set(t.branch, { thread_id: t.id, title: t.title, status: t.status });
-    }
-    for (const b of info.branches) {
-      const t = byBranch.get(b.name);
-      if (t) Object.assign(b, t);
-    }
+  res.json(attachThreads(project, await gitBranchInfo(project)));
+});
+
+// All mounted projects at once, so the dashboard can show unpushed work across
+// every project (not just the open one). Each entry carries the same shape as
+// /git/branches plus a project name and an unpushed total. Projects with no
+// claude/* branches are dropped to keep the list focused on actual work.
+router.get("/git/branches/all", async (req, res) => {
+  let mounts = [];
+  try {
+    mounts = await listWorkspaceProjects();
+  } catch {
+    /* fall back to projects that have threads */
   }
-  res.json(info);
+  const names = new Set([...mounts, ...db.projectSummaries().map((s) => s.project)]);
+  const infos = await Promise.all(
+    [...names].map(async (project) => {
+      const info = attachThreads(project, await gitBranchInfo(project));
+      const unpushed_total = (info.branches || []).reduce((n, b) => n + (b.unpushed || 0), 0);
+      return { project, unpushed_total, ...info };
+    })
+  );
+  const projects = infos
+    .filter((p) => p.is_repo && p.branches && p.branches.length)
+    // Projects with unpushed work first, then most-recently-touched.
+    .sort(
+      (a, b) =>
+        (b.unpushed_total > 0) - (a.unpushed_total > 0) ||
+        (b.branches[0]?.last?.date || "").localeCompare(a.branches[0]?.last?.date || "") ||
+        a.project.localeCompare(b.project)
+    );
+  res.json({ projects });
 });
 
 // Diff for a whole branch's unpushed range (?branch=) or a single commit

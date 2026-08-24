@@ -37,6 +37,8 @@ export const useStore = defineStore("main", () => {
 
   const panel = ref<string | null>(null); // 'notes' | 'context' | 'scheduler' | 'branches'
   const gitInfo = ref<any>({ available: false, is_repo: false, branches: [] });
+  const gitScope = ref<"project" | "all">("project"); // Branches panel scope
+  const gitAll = ref<any>({ projects: [], loading: false }); // all-projects branches
   const detailTab = ref<"conversation" | "raw">("conversation");
   const rawData = ref<any>(null);
 
@@ -312,7 +314,8 @@ export const useStore = defineStore("main", () => {
       await loadScheduled();
       await loadSchedulerConfig();
     }
-    if (which === "branches") await loadGitBranches();
+    if (which === "branches")
+      await (gitScope.value === "all" ? loadAllGitBranches() : loadGitBranches());
   }
   function closePanel() {
     panel.value = null;
@@ -326,8 +329,23 @@ export const useStore = defineStore("main", () => {
       gitInfo.value = { available: false, is_repo: false, branches: [] };
     }
   }
-  function loadDiff(opts: { branch?: string; commit?: string }) {
-    return api.gitDiff(currentProject.value!, opts);
+  async function loadAllGitBranches() {
+    gitAll.value = { projects: [], loading: true };
+    try {
+      const r = await api.gitBranchesAll();
+      gitAll.value = { projects: r.projects || [], loading: false };
+    } catch {
+      gitAll.value = { projects: [], loading: false };
+    }
+  }
+  async function setGitScope(scope: "project" | "all") {
+    if (gitScope.value === scope) return;
+    gitScope.value = scope;
+    await (scope === "all" ? loadAllGitBranches() : loadGitBranches());
+  }
+  // project is required in all-projects mode; defaults to the open project.
+  function loadDiff(opts: { branch?: string; commit?: string }, project?: string) {
+    return api.gitDiff(project || currentProject.value!, opts);
   }
 
   async function loadScheduled() {
@@ -389,12 +407,13 @@ export const useStore = defineStore("main", () => {
     projectSort, threadSort, unreadOnly, sortedProjects, sortedThreads, unreadCount,
     thread, turns, events, usage, limits, containers, notes, context,
     scheduled, schedulerCfg, schedulerDecision,
-    panel, gitInfo, detailTab, rawData, anyRunning,
+    panel, gitInfo, gitScope, gitAll, detailTab, rawData, anyRunning,
     init, doLogin, doLogout, toggleTheme,
     setProjectSort, setThreadSort, toggleUnreadOnly, markUnread, markRead,
     loadProjects, selectProject, loadThreads, loadStatus,
     submit, openThread, followup, approvePlan, stop, loadRaw,
-    openPanel, closePanel, loadGitBranches, loadDiff, addNote, updateNote, runNoteLine,
+    openPanel, closePanel, loadGitBranches, loadAllGitBranches, setGitScope, loadDiff,
+    addNote, updateNote, runNoteLine,
     loadScheduled, loadSchedulerConfig, saveSchedulerConfig,
     addScheduled, updateScheduled, deleteScheduled, reorderScheduled, runScheduled,
   };

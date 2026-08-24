@@ -150,9 +150,12 @@ function moveTask(id: string, dir: number) {
 }
 
 // -- branches panel ----------------------------------------------------------
-const gitOpen = ref<string | null>(null); // expanded branch name
+const gitOpen = ref<string | null>(null); // expanded branch key (project::name)
 const gitDiffText = ref("");
 const gitDiffLabel = ref("");
+// In all-projects mode branches from different projects can share a name, so
+// the expanded-key and diff calls are always scoped by project.
+const branchKey = (project: string, name: string) => `${project}::${name}`;
 
 function reldate(iso: string) {
   if (!iso) return "";
@@ -167,6 +170,31 @@ const pushCmd = computed(
   () => "git push origin 'refs/heads/claude/*:refs/heads/claude/*'"
 );
 
+// Normalize both scopes into the same shape so the panel renders one way.
+// project scope → a single group; all scope → one group per project.
+const branchGroups = computed(() => {
+  if (store.gitScope === "all") {
+    return (store.gitAll.projects || []).map((p: any) => ({
+      project: p.project,
+      current: p.current,
+      dirty: p.dirty,
+      unpushed_total: p.unpushed_total,
+      branches: p.branches || [],
+    }));
+  }
+  const g = store.gitInfo;
+  if (!g.is_repo) return [];
+  return [
+    {
+      project: store.currentProject,
+      current: g.current,
+      dirty: g.dirty,
+      unpushed_total: (g.branches || []).reduce((n: number, b: any) => n + (b.unpushed || 0), 0),
+      branches: g.branches || [],
+    },
+  ];
+});
+
 // Split a diff into per-line rows so we can color +/- lines.
 const diffRows = computed(() =>
   (gitDiffText.value || "").split("\n").map((text) => {
@@ -178,29 +206,31 @@ const diffRows = computed(() =>
   })
 );
 
-async function toggleBranch(b: any) {
-  if (gitOpen.value === b.name) {
+async function toggleBranch(b: any, project = store.currentProject!) {
+  const key = branchKey(project, b.name);
+  if (gitOpen.value === key) {
     gitOpen.value = null;
     return;
   }
-  gitOpen.value = b.name;
+  gitOpen.value = key;
   gitDiffLabel.value =
     b.unpushed > 0
       ? `unpushed diff · ${b.unpushed} commit${b.unpushed > 1 ? "s" : ""}`
       : "nothing unpushed";
   gitDiffText.value = "loading…";
-  const r = await store.loadDiff({ branch: b.name });
+  const r = await store.loadDiff({ branch: b.name }, project);
   gitDiffText.value = r.diff || "(no changes)";
 }
-async function showCommit(sha: string) {
+async function showCommit(sha: string, project = store.currentProject!) {
   gitDiffLabel.value = `commit ${sha}`;
   gitDiffText.value = "loading…";
-  const r = await store.loadDiff({ commit: sha });
+  const r = await store.loadDiff({ commit: sha }, project);
   gitDiffText.value = r.diff || "(no changes)";
 }
-function openReq(b: any) {
+async function openReq(b: any, project = store.currentProject) {
   if (!b.thread_id) return;
-  store.openThread(b.thread_id);
+  if (project && project !== store.currentProject) await store.selectProject(project);
+  await store.openThread(b.thread_id);
   store.closePanel();
 }
 </script>
@@ -302,7 +332,7 @@ function openReq(b: any) {
         <header>
           <h3>
             {{ store.panel === "notes" ? "Notes" : store.panel === "scheduler" ? "Scheduler" : store.panel === "branches" ? "Branches" : "Context" }}
-            <template v-if="store.panel !== 'scheduler'"> — {{ store.currentProject }}</template>
+            <template v-if="store.panel !== 'scheduler' && !(store.panel === 'branches' && store.gitScope === 'all')"> — {{ store.currentProject }}</template>
           </h3>
           <button class="btn" style="margin-left: auto" @click="store.closePanel()">Close</button>
         </header>
@@ -458,28 +488,79 @@ function openReq(b: any) {
         </div>
 
         <div class="so-body" v-else-if="store.panel === 'branches'">
-          <div v-if="!store.gitInfo.is_repo" class="empty">
+          <div class="git-scope">
+            <button
+              class="seg-btn"
+              :class="{ active: store.gitScope === 'project' }"
+              title="claude/* branches in the open project"
+              @click="store.setGitScope('project')"
+            >
+              This project
+            </button>
+            <button
+              class="seg-btn"
+              :class="{ active: store.gitScope === 'all' }"
+              title="Unpushed work across every mounted project"
+              @click="store.setGitScope('all')"
+            >
+              All projects
+            </button>
+          </div>
+
+          <div class="push-hint">
+            <div class="tokens" style="margin:0 0 4px">Push all Claude branches from the host:</div>
+            <pre class="mono push-cmd">{{ pushCmd }}</pre>
+          </div>
+
+          <!-- project scope: not-a-repo / could-not-read states -->
+          <div
+            v-if="store.gitScope === 'project' && !store.gitInfo.is_repo"
+            class="empty"
+          >
             {{ store.gitInfo.available === false ? "Could not read git." : "Not a git repository." }}
           </div>
-          <template v-else>
-            <div v-if="store.gitInfo.dirty" class="dirty-banner">
-              ⚠ {{ store.gitInfo.dirty }} uncommitted change{{ store.gitInfo.dirty > 1 ? "s" : "" }}
-              in the working tree (current branch: <span class="mono">{{ store.gitInfo.current }}</span>)
+
+          <!-- all scope: loading / empty states -->
+          <div v-else-if="store.gitScope === 'all' && store.gitAll.loading" class="empty">
+            Scanning all projects…
+          </div>
+          <div
+            v-else-if="store.gitScope === 'all' && !branchGroups.length"
+            class="empty"
+          >
+            No claude/* branches in any project yet.
+          </div>
+          <div
+            v-else-if="store.gitScope === 'project' && !store.gitInfo.branches.length"
+            class="empty"
+          >
+            No claude/* branches yet.
+          </div>
+
+          <template v-for="g in branchGroups" :key="g.project">
+            <div v-if="store.gitScope === 'all'" class="git-group-head">
+              <span class="mono git-group-proj">{{ g.project }}</span>
+              <span
+                v-if="g.unpushed_total > 0"
+                class="chip unpushed-yes"
+                title="total commits not on any remote in this project"
+              >↑ {{ g.unpushed_total }} to push</span>
+              <span v-else class="chip unpushed-no">✓ all pushed</span>
+              <span v-if="g.dirty" class="tokens git-group-dirty">⚠ {{ g.dirty }} uncommitted</span>
             </div>
-            <div class="push-hint">
-              <div class="tokens" style="margin:0 0 4px">Push all Claude branches from the host:</div>
-              <pre class="mono push-cmd">{{ pushCmd }}</pre>
+            <div
+              v-else-if="g.dirty"
+              class="dirty-banner"
+            >
+              ⚠ {{ g.dirty }} uncommitted change{{ g.dirty > 1 ? "s" : "" }}
+              in the working tree (current branch: <span class="mono">{{ g.current }}</span>)
             </div>
 
-            <div v-if="!store.gitInfo.branches.length" class="empty">
-              No claude/* branches yet.
-            </div>
-
-            <div v-for="b in store.gitInfo.branches" :key="b.name" class="branch-card">
-              <div class="branch-head" @click="toggleBranch(b)">
-                <span class="branch-caret">{{ gitOpen === b.name ? "▾" : "▸" }}</span>
+            <div v-for="b in g.branches" :key="g.project + '::' + b.name" class="branch-card">
+              <div class="branch-head" @click="toggleBranch(b, g.project)">
+                <span class="branch-caret">{{ gitOpen === branchKey(g.project, b.name) ? "▾" : "▸" }}</span>
                 <span class="mono branch-name">{{ b.name }}</span>
-                <span v-if="b.name === store.gitInfo.current" class="chip cur-chip">current</span>
+                <span v-if="b.name === g.current" class="chip cur-chip">current</span>
                 <span
                   class="chip"
                   :class="b.unpushed > 0 ? 'unpushed-yes' : 'unpushed-no'"
@@ -492,7 +573,7 @@ function openReq(b: any) {
                     v-if="b.thread_id"
                     class="n-linkbtn"
                     title="open the request/response that created this branch"
-                    @click.stop="openReq(b)"
+                    @click.stop="openReq(b, g.project)"
                   >
                     open request →
                   </button>
@@ -502,14 +583,14 @@ function openReq(b: any) {
                 {{ b.last.sha }} · {{ b.last.subject }} · {{ reldate(b.last.date) }}
               </div>
 
-              <div v-if="gitOpen === b.name" class="branch-body">
+              <div v-if="gitOpen === branchKey(g.project, b.name)" class="branch-body">
                 <div v-if="b.commits && b.commits.length" class="commit-list">
                   <div class="tokens" style="margin:0 0 2px">Unpushed commits (click to view):</div>
                   <button
                     v-for="c in b.commits"
                     :key="c.sha"
                     class="commit-row"
-                    @click="showCommit(c.sha)"
+                    @click="showCommit(c.sha, g.project)"
                   >
                     <span class="mono">{{ c.sha }}</span>
                     <span class="commit-subj">{{ c.subject }}</span>

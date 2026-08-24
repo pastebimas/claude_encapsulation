@@ -414,6 +414,17 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
 .empty { color: var(--muted); padding: 24px 16px; text-align: center; }
 
 /* -- branches panel -- */
+.git-scope {
+  display: inline-flex; margin-bottom: 12px;
+  border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+}
+.git-group-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 16px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.git-group-head:first-child { margin-top: 0; }
+.git-group-proj { font-weight: 600; word-break: break-all; }
+.git-group-dirty { color: var(--amber); margin: 0; }
 .dirty-banner {
   border: 1px solid var(--amber); border-left: 3px solid var(--amber);
   background: color-mix(in srgb, var(--amber) 12%, var(--bg2));

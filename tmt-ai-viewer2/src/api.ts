@@ -72,6 +72,7 @@ export const api = {
 
   gitBranches: (project: string) =>
     req(`/api/git/branches?project=${encodeURIComponent(project)}`),
+  gitBranchesAll: () => req(`/api/git/branches/all`),
   gitDiff: (project: string, opts: { branch?: string; commit?: string }) =>
     req(
       `/api/git/diff?project=${encodeURIComponent(project)}&` +
