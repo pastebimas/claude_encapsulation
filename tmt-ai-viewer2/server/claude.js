@@ -49,6 +49,16 @@ const RUN_NO_QUESTIONS =
     " can reasonably decide yourself.";
 
 const LIMIT_RE = /(?:session|usage|rate)[ _-]?limit|limit reached|hit your .{0,20}limit/i;
+// Transient infrastructure failures worth an automatic retry: API/proxy 5xx
+// (e.g. "API Error: 500 Proxy error: 400 … Can not decode content-encoding:
+// brotli"), overload, or a dropped connection.
+const TRANSIENT_RE =
+  /API Error:\s*5\d\d|Proxy error:|Can not decode content-encoding|overloaded_error|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up/i;
+const RETRY_MINUTES = parseInt(process.env.RUN_TRANSIENT_RETRY_MINUTES || "10", 10);
+const RETRY_MAX = parseInt(process.env.RUN_TRANSIENT_RETRY_MAX || "3", 10);
+export const AUTO_RETRY_PROMPT =
+  "The previous attempt failed with a transient API/proxy error. Try again:" +
+  " continue the task from where it left off and carry it through to completion.";
 const NOTES_MARKER_RE = /^NOTES:[ \t]*(.*)$/im;
 const QUESTION_MARKER_RE = /^QUESTION:[ \t]*(.*)$/im;
 const PLAN_OPTIONS = ["✓ Approve & run", "Revise the plan"];
@@ -465,13 +475,22 @@ async function ingest(thread, turn, runId, kind) {
     error: status === "error" ? errText || `exit ${exitCode}` || null : null,
   };
 
-  // usage-limit detection → mark resumable + schedule.
+  // usage-limit / transient-error detection → mark resumable + schedule. The
+  // retry loop (startRetryLoop) picks runs up once resume_at passes. Only an
+  // errored run schedules a retry — a successful result may merely *quote* an
+  // error string (e.g. a task about fixing one).
   const haystack = `${errText}\n${ctx.resultText || ""}`;
   if (!wasStopped && LIMIT_RE.test(haystack)) {
     fields.limit_hit = 1;
     fields.resume_at = new Date(
       Date.now() + parseInt(process.env.RUN_LIMIT_RETRY_MINUTES || "30", 10) * 60000
     ).toISOString();
+  } else if (
+    status === "error" &&
+    TRANSIENT_RE.test(haystack) &&
+    db.countTurnsWithText(thread.id, AUTO_RETRY_PROMPT) < RETRY_MAX
+  ) {
+    fields.resume_at = new Date(Date.now() + RETRY_MINUTES * 60000).toISOString();
   }
 
   db.updateRun(runId, fields);
@@ -506,8 +525,9 @@ async function ingest(thread, turn, runId, kind) {
   bus.emit(thread.id, { t: "done" });
 
   // Reclaim the worktree once the thread is terminal; keep it while awaiting a
-  // follow-up so the resume is instant. Branch + commits remain in .git.
-  if (thread.branch && !awaiting)
+  // follow-up (or an auto-retry) so the resume is instant and uncommitted work
+  // survives. Branch + commits remain in .git.
+  if (thread.branch && !awaiting && !fields.resume_at)
     removeWorktree(thread.project, thread.branch, user).catch(() => {});
 
   execCollect(CODE_CONTAINER, ["rm", "-f", outFile, errFile]).catch(() => {});
@@ -533,6 +553,38 @@ async function gitPull(thread, turnId, runId, user, workdir) {
     name: "git_pull",
     text: out || "already up to date",
   });
+}
+
+// -- auto-retry loop ---------------------------------------------------------
+// Consumes errored runs whose resume_at has passed (usage limit or transient
+// API/proxy failure) and resumes their thread with a "try again" follow-up.
+// DB-driven, so pending retries survive a server restart.
+export function startRetryLoop() {
+  setInterval(retryTick, 60_000);
+  console.log("auto-retry loop started");
+}
+
+function retryTick() {
+  try {
+    for (const run of db.dueRetryRuns()) {
+      // One shot per scheduled retry — clear before dispatch so a failure in
+      // startRun can't loop every tick.
+      db.updateRun(run.id, { resume_at: null });
+      const thread = db.getThread(run.thread_id);
+      if (!thread || thread.status === "running" || thread.status === "awaiting") continue;
+      // The user (or another retry) already moved the thread past this run.
+      const latest = db.latestRun(thread.id);
+      if (!latest || latest.id !== run.id) continue;
+      const sent = wrapPrompt(AUTO_RETRY_PROMPT, "resume", { branch: thread.branch || null });
+      const turn = db.addTurn(thread.id, AUTO_RETRY_PROMPT, sent, null);
+      db.setThreadStatus(thread.id, "running");
+      bus.emit(thread.id, { t: "status", status: "running" });
+      startRun(thread, turn, "resume");
+      console.log(`auto-retry: resuming thread ${thread.id} after run ${run.id} failed`);
+    }
+  } catch (e) {
+    console.error("retry tick:", e.message);
+  }
 }
 
 function saveNotes(thread, resultText) {

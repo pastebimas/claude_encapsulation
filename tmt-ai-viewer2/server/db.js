@@ -435,6 +435,28 @@ export function latestRun(threadId) {
     .get(threadId);
 }
 
+// Errored runs whose scheduled auto-retry time has passed.
+export function dueRetryRuns() {
+  return db
+    .prepare("SELECT * FROM runs WHERE status='error' AND resume_at IS NOT NULL AND resume_at <= ?")
+    .all(now());
+}
+
+// A retry is queued for this thread but hasn't fired yet.
+export function hasPendingRetry(threadId) {
+  return !!db
+    .prepare("SELECT 1 FROM runs WHERE thread_id=? AND status='error' AND resume_at IS NOT NULL LIMIT 1")
+    .get(threadId);
+}
+
+// How many turns with exactly this user_text the thread already has — caps the
+// number of automatic "try again" follow-ups.
+export function countTurnsWithText(threadId, text) {
+  return db
+    .prepare("SELECT COUNT(*) AS n FROM turns WHERE thread_id=? AND user_text=?")
+    .get(threadId, text).n;
+}
+
 // -- events ------------------------------------------------------------------
 
 export function nextEventSeq(threadId) {

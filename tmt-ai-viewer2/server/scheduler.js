@@ -99,8 +99,11 @@ function reconcile() {
       db.updateScheduled(t.id, { status: "done", finished_at: db.now() });
     else if (s === "stopped")
       db.updateScheduled(t.id, { status: "canceled", finished_at: db.now() });
-    else if (s === "error" || s === "stale")
+    else if (s === "error" || s === "stale") {
+      // A transient-error auto-retry is queued — not final yet.
+      if (s === "error" && db.hasPendingRetry(t.thread_id)) continue;
       db.updateScheduled(t.id, { status: "failed", error: `run ${s}`, finished_at: db.now() });
+    }
   }
 }
 
