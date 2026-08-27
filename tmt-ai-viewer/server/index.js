@@ -33,7 +33,7 @@ if (fs.existsSync(DIST)) {
   );
 }
 
-app.listen(PORT, "0.0.0.0", () => console.log(`tmt-ai-viewer2 on :${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`tmt-ai-viewer on :${PORT}`));
 
 startScheduler();
 startRetryLoop();

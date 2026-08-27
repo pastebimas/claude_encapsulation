@@ -185,11 +185,11 @@ segment (`new-thing`) becomes the DB filename.
 
 | Path | Purpose |
 | --- | --- |
-| `compose.yml` | services: `tmt-ai-proxy`, `tmt-ai-viewer2`, `tmt-ai-datasette`, `tmt-ai-code`, `tmt-ai-docker-proxy` |
+| `compose.yml` | services: `tmt-ai-proxy`, `tmt-ai-viewer`, `tmt-ai-datasette`, `tmt-ai-code`, `tmt-ai-docker-proxy` |
 | `compose.override.yml` | **your** project mounts (gitignored) |
 | `tmt-ai-code/` | Claude CLI container image |
 | `tmt-ai-proxy/` | Anthropic API logger; SQLite migrations in `migrations/` |
-| `tmt-ai-viewer2/` | web dashboard (Vue SPA + Node; threads/notes, state in `data/.viewer2-state.db`) |
+| `tmt-ai-viewer/` | web dashboard (Vue SPA + Node; threads/notes, state in `data/.viewer2-state.db`) |
 | `tmt-ai-datasette/` | Datasette UI |
 | `claude-config/` | Claude credentials, settings, container-side `CLAUDE.md` (gitignored) |
 | `data/` | one `<project>.db` per mapped project (gitignored) |
