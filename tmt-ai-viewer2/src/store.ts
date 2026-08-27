@@ -209,9 +209,9 @@ export const useStore = defineStore("main", () => {
     }
   }
 
-  async function submit(prompt: string, plan = false, model = "") {
+  async function submit(prompt: string, plan = false, model = "", direct = false) {
     if (!currentProject.value || !prompt.trim()) return;
-    const r = await api.newThread(currentProject.value, prompt.trim(), plan, model);
+    const r = await api.newThread(currentProject.value, prompt.trim(), plan, model, direct);
     await loadThreads();
     await openThread(r.thread_id);
   }

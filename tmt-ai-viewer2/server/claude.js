@@ -10,7 +10,7 @@ import {
   resolveExecUser,
 } from "./docker.js";
 import { addNote } from "./projects.js";
-import { ensureWorktree, removeWorktree, branchNameFor, branchPromptNote } from "./git.js";
+import { ensureWorktree, removeWorktree, branchNameFor, branchPromptNote, directPromptNote } from "./git.js";
 import * as db from "./db.js";
 
 export const bus = new EventEmitter();
@@ -103,7 +103,9 @@ export function wrapPrompt(userText, kind, opts = {}) {
   if (kind === "new" && RUN_PROMPT_SUFFIX) body = `${body}\n\n${RUN_PROMPT_SUFFIX}`;
   // When the run is scoped to a git branch, remind Claude to stay on it and
   // commit locally (applies to both the first run and any resume/followup).
+  // Direct ("no commits") threads get the opposite instruction instead.
   if (opts.branch) body = `${body}\n\n${branchPromptNote(opts.branch)}`;
+  else if (opts.direct) body = `${body}\n\n${directPromptNote()}`;
   return RUN_NO_QUESTIONS ? `${RUN_NO_QUESTIONS}\n\n${body}` : body;
 }
 

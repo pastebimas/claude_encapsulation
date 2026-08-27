@@ -114,6 +114,7 @@ for (const ddl of [
   "ALTER TABLE threads ADD COLUMN ext_task_id TEXT",
   "ALTER TABLE threads ADD COLUMN ext_task_source TEXT",
   "ALTER TABLE threads ADD COLUMN branch TEXT",
+  "ALTER TABLE threads ADD COLUMN direct_mode INTEGER NOT NULL DEFAULT 0",
 ]) {
   try {
     db.exec(ddl);
@@ -235,14 +236,14 @@ export function setSettings(key, obj) {
 
 // -- threads / turns ---------------------------------------------------------
 
-export function createThread(project, title, planMode = false, model = null) {
+export function createThread(project, title, planMode = false, model = null, direct = false) {
   const ts = now();
   const id = uuid();
   const sessionId = uuid();
   db.prepare(
-    `INSERT INTO threads (id, project, session_id, title, status, plan_mode, model, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`
-  ).run(id, project, sessionId, title, planMode ? 1 : 0, model || null, ts, ts);
+    `INSERT INTO threads (id, project, session_id, title, status, plan_mode, model, direct_mode, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)`
+  ).run(id, project, sessionId, title, planMode ? 1 : 0, model || null, direct ? 1 : 0, ts, ts);
   return getThread(id);
 }
 
@@ -292,7 +293,7 @@ export function getThread(id) {
 export function listThreads(project) {
   return db
     .prepare(
-      `SELECT id, project, session_id, title, status, plan_mode, model, branch, created_at, updated_at, read_at,
+      `SELECT id, project, session_id, title, status, plan_mode, model, branch, direct_mode, created_at, updated_at, read_at,
               (read_at IS NULL OR updated_at > read_at) AS unread
        FROM threads WHERE project=? ORDER BY updated_at DESC`
     )
