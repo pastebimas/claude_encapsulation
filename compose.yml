@@ -27,6 +27,35 @@ services:
       - tmt-ai-proxy
     restart: unless-stopped
 
+  tmt-ai-viewer2:
+    build:
+      context: ./tmt-ai-viewer2
+    container_name: tmt-ai-viewer2
+    ports:
+      - "8035:8035"
+      - "${TASK_API_BIND:-127.0.0.1}:${TASK_API_PORT:-8036}:8036"
+    volumes:
+      - ./data:/data
+    environment:
+      DOCKER_API: http://tmt-ai-docker-proxy:2375
+      CODE_CONTAINER: tmt-ai-code
+      OWN_COMPOSE_PROJECT: tmt-ai
+      VIEWER_PASSWORD: ${VIEWER_PASSWORD:-}
+      VIEWER_MAX_ATTEMPTS: ${VIEWER_MAX_ATTEMPTS:-5}
+      VIEWER_LOCKOUT_SECONDS: ${VIEWER_LOCKOUT_SECONDS:-300}
+      RUN_TIMEOUT: ${RUN_TIMEOUT:-3600}
+      TASK_API_PORT: ${TASK_API_PORT:-8036}
+      TASK_API_TOKEN: ${TASK_API_TOKEN:-}
+      TASK_API_IP_ALLOWLIST: ${TASK_API_IP_ALLOWLIST:-}
+      TASK_API_TRUST_PROXY: ${TASK_API_TRUST_PROXY:-}
+      TASK_API_ONE_AT_A_TIME: ${TASK_API_ONE_AT_A_TIME:-}
+      TASK_GIT_NAME: ${TASK_GIT_NAME:-tmt-ai}
+      TASK_GIT_EMAIL: ${TASK_GIT_EMAIL:-tmt-ai@localhost}
+      DASHBOARD_URL: ${DASHBOARD_URL:-}
+    depends_on:
+      - tmt-ai-docker-proxy
+    restart: unless-stopped
+
   # allows docker commands to be run from within the container.
   # Disable if you dont neet it as it could become a security risk.'
   tmt-ai-docker-proxy:

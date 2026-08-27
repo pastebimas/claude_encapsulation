@@ -19,6 +19,8 @@ import aiohttp
 import aiosqlite
 from aiohttp import web
 
+from prompt_extract import extract_user_prompt
+
 
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8080"))
 TARGET_API_URL = os.getenv("TARGET_API_URL", "https://api.anthropic.com")
@@ -113,10 +115,11 @@ def compact_streaming_response(raw_body: str) -> str:
     if not raw_body or not raw_body.strip().startswith("event:"):
         return raw_body
 
-    chunks = []
-    content_parts = []
+    chunk_count = 0
+    blocks = {}  # index -> {"block": start block, "text": [], "json": []}
     metadata = {}
     usage = {}
+    stream_error = None
 
     for line in raw_body.split("\n"):
         line = line.strip()
@@ -131,9 +134,10 @@ def compact_streaming_response(raw_body: str) -> str:
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
             continue
-        chunks.append(chunk)
+        chunk_count += 1
+        ctype = chunk.get("type")
 
-        if not metadata and chunk.get("type") == "message_start":
+        if not metadata and ctype == "message_start":
             msg = chunk.get("message", {})
             metadata = {
                 "id": msg.get("id"),
@@ -146,32 +150,73 @@ def compact_streaming_response(raw_body: str) -> str:
             if msg.get("usage"):
                 usage = msg.get("usage", {})
 
-        if chunk.get("type") == "content_block_delta":
-            delta = chunk.get("delta", {})
-            if delta.get("type") == "text_delta":
-                content_parts.append(delta.get("text", ""))
-            elif delta.get("type") == "thinking_delta":
-                content_parts.append(delta.get("thinking", ""))
+        if ctype == "error":
+            stream_error = chunk.get("error") or {"type": "unknown", "message": ""}
 
-        if chunk.get("type") == "message_delta":
+        if ctype == "content_block_start":
+            idx = chunk.get("index", len(blocks))
+            blocks[idx] = {
+                "block": dict(chunk.get("content_block") or {}),
+                "text": [],
+                "json": [],
+            }
+
+        if ctype == "content_block_delta":
+            idx = chunk.get("index", 0)
+            entry = blocks.setdefault(idx, {"block": {}, "text": [], "json": []})
+            delta = chunk.get("delta", {})
+            dtype = delta.get("type")
+            if dtype == "text_delta":
+                entry["text"].append(delta.get("text", ""))
+            elif dtype == "thinking_delta":
+                entry["text"].append(delta.get("thinking", ""))
+            elif dtype == "input_json_delta":
+                entry["json"].append(delta.get("partial_json", ""))
+
+        if ctype == "message_delta":
             delta = chunk.get("delta", {})
             if delta.get("stop_reason"):
                 metadata["stop_reason"] = delta.get("stop_reason")
             if chunk.get("usage"):
                 usage.update(chunk.get("usage", {}))
 
-    if not chunks:
+    if not chunk_count:
         return raw_body
+
+    content = []
+    for idx in sorted(blocks):
+        entry = blocks[idx]
+        block = entry["block"]
+        btype = block.get("type") or ("thinking" if entry["text"] else "text")
+        joined = "".join(entry["text"])
+        if btype == "thinking":
+            block["thinking"] = joined
+            block.pop("signature", None)
+        elif btype == "text":
+            block["text"] = joined
+        elif btype == "tool_use":
+            raw_input = "".join(entry["json"])
+            try:
+                block["input"] = json.loads(raw_input) if raw_input else {}
+            except json.JSONDecodeError:
+                block["input_json"] = raw_input
+        content.append(block)
+    if not content:
+        content = [{"type": "text", "text": ""}]
 
     compacted = {
         **metadata,
-        "content": [{"type": "text", "text": "".join(content_parts)}],
+        "content": content,
         "usage": usage,
         "_compacted": {
-            "original_chunks": len(chunks),
+            "original_chunks": chunk_count,
             "compacted_at": datetime.utcnow().isoformat(),
         },
     }
+    if stream_error:
+        compacted["error"] = stream_error
+        if not metadata:
+            compacted["type"] = "error"
     return json.dumps(compacted)
 
 
@@ -256,6 +301,7 @@ class ProjectLogger:
         response_headers: dict,
         response_body: Optional[str],
         duration_ms: int,
+        session_id: Optional[str] = None,
     ):
         await self.ensure_initialized(project)
 
@@ -264,21 +310,24 @@ class ProjectLogger:
         response_headers_json = json.dumps(dict(response_headers))
 
         request_body_json = None
+        prompt_text = None
         if request_body:
             try:
-                request_body_json = json.dumps(json.loads(request_body))
+                parsed = json.loads(request_body)
+                request_body_json = json.dumps(parsed)
+                prompt_text = extract_user_prompt(parsed)
             except json.JSONDecodeError:
                 request_body_json = json.dumps({"raw": request_body})
 
         db_path = self.db_path_for(project)
         try:
             async with aiosqlite.connect(db_path) as db:
-                await db.execute(
+                cursor = await db.execute(
                     """
                     INSERT INTO request_logs
                     (timestamp, method, path, target_url, request_headers, request_body,
-                     response_status, response_headers, response_body, duration_ms)
-                    VALUES (?, ?, ?, ?, json(?), json(?), ?, json(?), ?, ?)
+                     response_status, response_headers, response_body, duration_ms, session_id)
+                    VALUES (?, ?, ?, ?, json(?), json(?), ?, json(?), ?, ?, ?)
                     """,
                     (
                         timestamp,
@@ -291,8 +340,17 @@ class ProjectLogger:
                         response_headers_json,
                         response_body,
                         duration_ms,
+                        session_id,
                     ),
                 )
+                # Human-typed prompts get their own row so the viewer can list
+                # them without re-parsing bodies (see prompt_extract.py).
+                if prompt_text is not None:
+                    await db.execute(
+                        "INSERT OR IGNORE INTO user_prompts"
+                        " (log_id, session_id, timestamp, prompt_text) VALUES (?, ?, ?, ?)",
+                        (cursor.lastrowid, session_id, timestamp, prompt_text),
+                    )
                 await db.commit()
         except Exception as e:
             print(f"✗ Failed to write log for project '{project}' ({db_path}): {e}")
@@ -315,6 +373,7 @@ async def proxy_handler(request: web.Request) -> web.Response:
     }
 
     project = extract_project_name(request_body)
+    session_id = request.headers.get("x-claude-code-session-id")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -364,6 +423,7 @@ async def proxy_handler(request: web.Request) -> web.Response:
                     response_headers=redact_headers(response_headers),
                     response_body=response_body_text,
                     duration_ms=duration_ms,
+                    session_id=session_id,
                 )
 
                 print(
@@ -391,8 +451,17 @@ async def health_check(request: web.Request) -> web.Response:
 async def init_app() -> web.Application:
     app = web.Application()
     logger = ProjectLogger(DATA_DIR)
-    # Pre-init the default DB so Datasette has something to mount at startup.
+    # Pre-init the default DB so Datasette has something to mount at startup,
+    # and migrate every existing project DB so new migrations (e.g. the
+    # user_prompts backfill) apply without waiting for fresh traffic.
     await logger.ensure_initialized(DEFAULT_PROJECT)
+    for db_file in sorted(DATA_DIR.glob("*.db")):
+        if db_file.name.startswith("."):  # skip .viewer-state.db etc.
+            continue
+        try:
+            await logger.ensure_initialized(db_file.stem)
+        except Exception as e:
+            print(f"  ! Failed to initialize '{db_file.stem}': {e}")
     app["logger"] = logger
     app["target_api_url"] = TARGET_API_URL
 
