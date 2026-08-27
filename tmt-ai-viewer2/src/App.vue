@@ -488,6 +488,19 @@ function openReq(b: any) {
                   {{ b.unpushed > 0 ? `↑ ${b.unpushed} to push` : "✓ pushed" }}
                 </span>
                 <span class="branch-actions">
+                  <a
+                    v-if="b.pr_url"
+                    class="n-linkbtn"
+                    :href="b.pr_url"
+                    target="_blank"
+                    rel="noopener"
+                    :title="b.unpushed > 0
+                      ? 'open a pull request on the remote — this branch still has unpushed commits, push first for them to show up'
+                      : 'open a pull request for this branch on the remote'"
+                    @click.stop
+                  >
+                    open PR ↗
+                  </a>
                   <button
                     v-if="b.thread_id"
                     class="n-linkbtn"

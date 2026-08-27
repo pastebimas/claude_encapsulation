@@ -296,6 +296,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
   font-size: 11px; padding: 0;
 }
 .n-linkbtn:hover { color: var(--accent); }
+a.n-linkbtn { text-decoration: none; }
 .n-progress {
   color: var(--muted); font-size: 11px; white-space: nowrap;
   font-variant-numeric: tabular-nums;
