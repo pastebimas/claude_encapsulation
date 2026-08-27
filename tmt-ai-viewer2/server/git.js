@@ -54,6 +54,16 @@ export function branchPromptNote(branch) {
   );
 }
 
+// The instruction for a "no commits" (direct) run: edit the current working
+// tree in place, leave everything uncommitted for the user.
+export function directPromptNote() {
+  return (
+    "Work directly in the project's current working tree and branch. Do NOT" +
+    " create, switch, or delete git branches, do NOT commit, and do NOT push —" +
+    " leave all changes uncommitted for the user to review and commit themselves."
+  );
+}
+
 export function git(project, args, user) {
   return execCollect(CODE_CONTAINER, ["git", "-C", `/workspace/${project}`, ...args], {
     user,

@@ -84,15 +84,20 @@ router.get("/threads", (req, res) => {
 });
 
 router.post("/threads", (req, res) => {
-  const { project, prompt, plan, model } = req.body || {};
+  const { project, prompt, plan, model, direct } = req.body || {};
   if (!project || !prompt || !prompt.trim())
     return res.status(400).json({ error: "project and prompt required" });
-  const thread = db.createThread(project, squash(prompt), !!plan, normalizeModel(model));
+  const thread = db.createThread(project, squash(prompt), !!plan, normalizeModel(model), !!direct);
   // Each request gets its own git branch; ingest() creates/checks it out (and
-  // self-heals to a plain run if the project isn't a git repo).
-  const branch = branchNameFor(thread.title, thread.id);
-  db.setThreadBranch(thread.id, branch);
-  const sent = wrapPrompt(prompt, "new", { branch });
+  // self-heals to a plain run if the project isn't a git repo). A direct
+  // ("no commits") request skips the branch entirely and runs in the main
+  // working tree, instructed to leave everything uncommitted.
+  let branch = null;
+  if (!direct) {
+    branch = branchNameFor(thread.title, thread.id);
+    db.setThreadBranch(thread.id, branch);
+  }
+  const sent = wrapPrompt(prompt, "new", { branch, direct: !!direct });
   const turn = db.addTurn(thread.id, prompt, sent, null);
   startRun(db.getThread(thread.id), turn, "new");
   res.json({ thread_id: thread.id, branch });
@@ -111,7 +116,10 @@ router.post("/thread/followup", (req, res) => {
   // omitted → keep whatever the thread already uses.
   if (model !== undefined) db.setThreadModel(id, normalizeModel(model));
   const thread = db.getThread(id);
-  const sent = wrapPrompt(prompt, "resume", { branch: thread.branch || null });
+  const sent = wrapPrompt(prompt, "resume", {
+    branch: thread.branch || null,
+    direct: !!thread.direct_mode,
+  });
   const turn = db.addTurn(thread.id, prompt, sent, null);
   db.setThreadStatus(thread.id, "running");
   startRun(thread, turn, "resume");

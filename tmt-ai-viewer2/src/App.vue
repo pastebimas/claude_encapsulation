@@ -9,6 +9,7 @@ import ThreadDetail from "./components/ThreadDetail.vue";
 const store = useStore();
 const composer = ref("");
 const planMode = ref(false);
+const noCommit = ref(false);
 const noteText = ref("");
 
 // Model picker for the composer. "" = the CLI's configured default; the aliases
@@ -83,7 +84,7 @@ onMounted(() => store.init());
 async function run() {
   const p = composer.value;
   composer.value = "";
-  await store.submit(p, planMode.value, model.value);
+  await store.submit(p, planMode.value, model.value, noCommit.value);
 }
 
 const win = (m: number) => store.usage.windows?.[m] || { tokens: 0, requests: 0 };
@@ -279,9 +280,15 @@ function openReq(b: any) {
             <input type="checkbox" v-model="planMode" />
             Plan mode
           </label>
+          <label class="plan-toggle" title="Edit the current checkout in place: no new branch, no commits — changes stay uncommitted for you to review">
+            <input type="checkbox" v-model="noCommit" />
+            No commits
+          </label>
           <span class="tokens">
             {{ planMode
               ? "Claude proposes a plan; you approve it here before it executes."
+              : noCommit
+              ? "Edits the current checkout directly; no branch, nothing committed."
               : "Starts a new request in its own Claude session." }}
           </span>
         </div>
