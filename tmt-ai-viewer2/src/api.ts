@@ -63,6 +63,8 @@ export const api = {
     }),
   stopThread: (id: string) =>
     req("/api/thread/stop", { method: "POST", body: JSON.stringify({ id }) }),
+  scheduleApproval: (id: string) =>
+    req("/api/thread/schedule_approval", { method: "POST", body: JSON.stringify({ id }) }),
   markRead: (id: string) =>
     req("/api/thread/read", { method: "POST", body: JSON.stringify({ id }) }),
   markUnread: (id: string) =>

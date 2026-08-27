@@ -442,6 +442,7 @@ function openReq(b: any) {
           <div v-for="(t, i) in store.scheduled" :key="t.id" class="sched-task">
             <div class="sched-task-head">
               <span class="chip mono">{{ t.project }}</span>
+              <span v-if="t.kind === 'approval'" class="chip plan-chip" title="scheduled plan approval — resumes that request's session with the plan approved">◑ approval</span>
               <span class="chip" :class="'st-' + t.status">{{ t.status }}</span>
               <span class="tokens">· {{ t.agents }} agent{{ t.agents > 1 ? "s" : "" }}</span>
               <span class="sched-actions">
@@ -452,6 +453,7 @@ function openReq(b: any) {
                 <button class="n-linkbtn" @click="store.deleteScheduled(t.id)">✕</button>
               </span>
             </div>
+            <div v-if="t.kind === 'approval' && t.thread_title" class="tokens">plan of: {{ t.thread_title }}</div>
             <div class="sched-prompt">{{ t.prompt }}</div>
             <div v-if="t.error" class="tokens" style="color: var(--red)">{{ t.error }}</div>
           </div>

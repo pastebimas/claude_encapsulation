@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS settings (
 // ext_task_id / ext_task_source / branch: set when a thread was created by the
 //   external task-dispatch API (taskApi.js) — the caller's task id, where it
 //   came from, and the git branch the work is scoped to.
+// scheduled_tasks.kind: 'prompt' = fresh night task run as its own thread;
+//   'approval' = resume the awaiting thread in thread_id with its plan approved.
 for (const ddl of [
   "ALTER TABLE threads ADD COLUMN awaiting_json TEXT",
   "ALTER TABLE threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
@@ -114,6 +116,7 @@ for (const ddl of [
   "ALTER TABLE threads ADD COLUMN ext_task_id TEXT",
   "ALTER TABLE threads ADD COLUMN ext_task_source TEXT",
   "ALTER TABLE threads ADD COLUMN branch TEXT",
+  "ALTER TABLE scheduled_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'",
 ]) {
   try {
     db.exec(ddl);
@@ -143,9 +146,14 @@ export function markStaleOnBoot() {
     "UPDATE threads SET status='stale', updated_at=? WHERE status='running'"
   ).run(ts);
   // A scheduled task whose dispatched thread can't survive the restart goes back
-  // in the queue so the scheduler can pick it up again.
+  // in the queue so the scheduler can pick it up again. Approval tasks keep
+  // their thread_id — it IS the session they are meant to resume.
   db.prepare(
-    "UPDATE scheduled_tasks SET status='queued', thread_id=NULL, updated_at=? WHERE status='running'"
+    `UPDATE scheduled_tasks
+     SET status='queued',
+         thread_id=CASE WHEN kind='approval' THEN thread_id ELSE NULL END,
+         updated_at=?
+     WHERE status='running'`
   ).run(ts);
 }
 
@@ -153,7 +161,11 @@ export function markStaleOnBoot() {
 
 export function listScheduled() {
   return db
-    .prepare("SELECT * FROM scheduled_tasks ORDER BY position, created_at")
+    .prepare(
+      `SELECT s.*, t.title AS thread_title
+       FROM scheduled_tasks s LEFT JOIN threads t ON t.id = s.thread_id
+       ORDER BY s.position, s.created_at`
+    )
     .all();
 }
 
@@ -161,16 +173,16 @@ export function getScheduled(id) {
   return db.prepare("SELECT * FROM scheduled_tasks WHERE id=?").get(id);
 }
 
-export function addScheduled(project, prompt, agents = 1) {
+export function addScheduled(project, prompt, agents = 1, { kind = "prompt", thread_id = null } = {}) {
   const ts = now();
   const id = uuid();
   const row = db
     .prepare("SELECT COALESCE(MAX(position), 0) AS m FROM scheduled_tasks")
     .get();
   db.prepare(
-    `INSERT INTO scheduled_tasks (id, project, prompt, agents, status, position, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)`
-  ).run(id, project, prompt, Math.max(1, agents | 0), (row.m || 0) + 1, ts, ts);
+    `INSERT INTO scheduled_tasks (id, project, prompt, agents, status, position, kind, thread_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`
+  ).run(id, project, prompt, Math.max(1, agents | 0), (row.m || 0) + 1, kind, thread_id, ts, ts);
   return getScheduled(id);
 }
 
@@ -198,10 +210,28 @@ export function reorderScheduled(ids) {
   tx(ids);
 }
 
-export function nextQueued() {
+export function listQueued() {
   return db
-    .prepare("SELECT * FROM scheduled_tasks WHERE status='queued' ORDER BY position, created_at LIMIT 1")
-    .get();
+    .prepare("SELECT * FROM scheduled_tasks WHERE status='queued' ORDER BY position, created_at")
+    .all();
+}
+
+// The live (queued or dispatched) night approval for a thread, if any.
+export function approvalTaskForThread(threadId) {
+  return db
+    .prepare(
+      `SELECT * FROM scheduled_tasks
+       WHERE kind='approval' AND thread_id=? AND status IN ('queued','running')
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(threadId);
+}
+
+// Acting on the thread manually supersedes its night-scheduled approval.
+export function cancelQueuedApprovals(threadId) {
+  db.prepare(
+    "DELETE FROM scheduled_tasks WHERE kind='approval' AND thread_id=? AND status='queued'"
+  ).run(threadId);
 }
 
 export function runningScheduledCount() {

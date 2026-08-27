@@ -102,6 +102,8 @@ router.post("/thread/followup", (req, res) => {
   const { id, prompt, plan, model } = req.body || {};
   if (!db.getThread(id)) return res.status(404).json({ error: "no such thread" });
   if (!prompt || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
+  // A manual follow-up supersedes any night-scheduled approval of this thread.
+  db.cancelQueuedApprovals(id);
   // Approving a plan turns plan mode off so the resume run executes; any other
   // explicit value flips it too. Omitted → keep the thread's current mode.
   if (plan !== undefined) db.setThreadPlanMode(id, !!plan);
@@ -122,12 +124,33 @@ router.post("/thread/stop", async (req, res) => {
   res.json(await stopThread(id));
 });
 
+// Queue tonight's approval of the plan this thread is awaiting: instead of
+// running now, the night scheduler resumes this same session with plan mode
+// off once the window/idle/policy gates pass (scheduled_tasks kind 'approval').
+router.post("/thread/schedule_approval", (req, res) => {
+  const { id, prompt, agents } = req.body || {};
+  const thread = db.getThread(id);
+  if (!thread) return res.status(404).json({ error: "no such thread" });
+  if (thread.status !== "awaiting")
+    return res.status(409).json({ error: "thread is not awaiting approval" });
+  const existing = db.approvalTaskForThread(id);
+  if (existing) return res.json({ ok: true, task: existing });
+  const text =
+    (prompt && String(prompt).trim()) || "The plan is approved. Proceed and implement it.";
+  const task = db.addScheduled(thread.project, text, parseInt(agents, 10) || 1, {
+    kind: "approval",
+    thread_id: id,
+  });
+  res.json({ ok: true, task });
+});
+
 router.get("/thread", (req, res) => {
   const thread = db.getThread(String(req.query.id || ""));
   if (!thread) return res.status(404).json({ error: "no such thread" });
   db.markThreadRead(thread.id);
   res.json({
     thread,
+    scheduled_approval: db.approvalTaskForThread(thread.id) || null,
     turns: db.listTurns(thread.id),
     events: db.listEvents(thread.id, 0),
   });
@@ -278,6 +301,14 @@ router.post("/scheduled/:id/run", (req, res) => {
     db.updateScheduled(task.id, { agents: task.agents });
   }
   const thread = dispatchScheduled(task);
+  // An approval can decline to dispatch (its thread is busy or no longer
+  // awaiting) — surface why instead of crashing on thread.id.
+  if (!thread) {
+    const fresh = db.getScheduled(task.id);
+    return res
+      .status(409)
+      .json({ error: (fresh && fresh.error) || "not dispatchable right now — its thread is still running" });
+  }
   res.json({ ok: true, thread_id: thread.id });
 });
 

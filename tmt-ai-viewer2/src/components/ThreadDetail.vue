@@ -209,9 +209,25 @@ watch(
         <div class="content plan-text">{{ awaiting.plan }}</div>
         <div class="q-options">
           <button class="q-opt approve" @click="store.approvePlan()">✓ Approve &amp; run</button>
+          <button
+            v-if="!store.thread.scheduled_approval"
+            class="q-opt night"
+            title="Queue this approval for the night scheduler — it resumes this session and implements the plan during the night window"
+            @click="store.scheduleApprovalTonight()"
+          >
+            ☾ Approve &amp; run tonight
+          </button>
+          <button
+            v-else
+            class="q-opt night queued"
+            title="Unschedule the night run — the plan goes back to waiting for your approval"
+            @click="store.cancelScheduledApproval()"
+          >
+            ☾ Queued for tonight — click to unschedule
+          </button>
         </div>
         <div class="tokens" style="margin-top: 8px">
-          Approve to run it, or type changes below to keep planning (stays in plan mode).
+          Approve to run now, queue it for the night window, or type changes below to keep planning (stays in plan mode).
         </div>
       </div>
 

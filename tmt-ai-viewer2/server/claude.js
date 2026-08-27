@@ -173,9 +173,13 @@ function agentsSuffix(n) {
   );
 }
 
-// Dispatch a queued scheduled task as its own thread. Reuses the normal run
-// path; only the prompt wrapping differs (unattended + optional subagents).
+// Dispatch a queued scheduled task. kind 'prompt' runs as its own new thread;
+// kind 'approval' resumes the awaiting thread whose plan the user scheduled
+// for tonight. Reuses the normal run path; only the prompt wrapping differs
+// (unattended + optional subagents). Returns the thread, or null when nothing
+// was dispatched.
 export function dispatchScheduled(task) {
+  if (task.kind === "approval") return dispatchApproval(task);
   const thread = db.createThread(task.project, squashTitle(task.prompt));
   const branch = branchNameFor(thread.title, thread.id);
   db.setThreadBranch(thread.id, branch);
@@ -193,6 +197,40 @@ export function dispatchScheduled(task) {
   });
   // Re-fetch so the run carries the branch we just stored.
   startRun(db.getThread(thread.id), turn, "new");
+  return thread;
+}
+
+// Scheduled plan approval: resume the thread's session with plan mode off so
+// the approved plan executes overnight. A still-running thread keeps the task
+// queued for a later tick; a thread that is gone or no longer awaiting ends it.
+function dispatchApproval(task) {
+  const thread = task.thread_id ? db.getThread(task.thread_id) : null;
+  if (!thread) {
+    db.updateScheduled(task.id, { status: "failed", error: "thread missing", finished_at: db.now() });
+    return null;
+  }
+  if (thread.status === "running") return null;
+  // 'stale' still resumes: a restart marked it stale while the approval was
+  // queued, but the CLI session itself is resumable.
+  if (thread.status !== "awaiting" && thread.status !== "stale") {
+    db.updateScheduled(task.id, {
+      status: "canceled",
+      error: `thread is ${thread.status}, no longer awaiting approval`,
+      finished_at: db.now(),
+    });
+    return null;
+  }
+  db.setThreadPlanMode(thread.id, false);
+  const parts = [RUN_UNATTENDED];
+  const as = agentsSuffix(task.agents);
+  if (as) parts.push(as);
+  if (RUN_PROMPT_SUFFIX) parts.push(RUN_PROMPT_SUFFIX);
+  if (thread.branch) parts.push(branchPromptNote(thread.branch));
+  const sent = `${parts.join("\n\n")}\n\n${task.prompt}`;
+  const turn = db.addTurn(thread.id, task.prompt, sent, null);
+  db.setThreadStatus(thread.id, "running");
+  db.updateScheduled(task.id, { status: "running", started_at: db.now() });
+  startRun(db.getThread(thread.id), turn, "resume");
   return thread;
 }
 

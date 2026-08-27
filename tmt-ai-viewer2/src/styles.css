@@ -381,6 +381,9 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
 }
 .q-opt.approve { border-color: var(--green); color: var(--green); }
 .q-opt.approve:hover { background: var(--green); color: #fff; }
+.q-opt.night { border-color: var(--accent); color: var(--accent); }
+.q-opt.night:hover { background: var(--accent); color: #fff; }
+.q-opt.night.queued { border-style: dashed; }
 
 /* -- scheduler panel -- */
 .sched-config {
