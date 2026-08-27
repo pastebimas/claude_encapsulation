@@ -101,6 +101,20 @@ export async function ensureBranchRef(project, branch, user) {
   }
 }
 
+// Whether an existing local claude/* branch may be targeted by a new request.
+// Read-only, so no exec user or identity setup needed. Never throws.
+export async function localBranchExists(project, branch, user) {
+  if (!SAFE_PROJECT.test(project) || !SAFE_BRANCH.test(branch)) return false;
+  try {
+    return (
+      (await git(project, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], user))
+        .exitCode === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
 // ---- per-request git worktrees --------------------------------------------
 // Each run works in its own linked worktree so concurrent same-project runs
 // never share a checkout (no branch thrash, no interleaved edits). Worktrees

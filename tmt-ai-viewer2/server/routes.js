@@ -10,7 +10,7 @@ import {
   projectDockerStatus,
   projectContext,
 } from "./docker.js";
-import { branchNameFor, gitBranchInfo, gitDiff } from "./git.js";
+import { branchNameFor, gitBranchInfo, gitDiff, localBranchExists } from "./git.js";
 
 const router = Router();
 
@@ -83,21 +83,34 @@ router.get("/threads", (req, res) => {
   res.json({ threads: db.listThreads(String(req.query.project || "")) });
 });
 
-router.post("/threads", (req, res) => {
-  const { project, prompt, plan, model, direct } = req.body || {};
+router.post("/threads", async (req, res) => {
+  const { project, prompt, plan, model, direct, branch: existing } = req.body || {};
   if (!project || !prompt || !prompt.trim())
     return res.status(400).json({ error: "project and prompt required" });
-  const thread = db.createThread(project, squash(prompt), !!plan, normalizeModel(model), !!direct);
+  // An explicitly-picked existing branch is validated before the thread row is
+  // created (no orphan threads on a typo'd/deleted branch) and overrides direct.
+  const useExisting = existing && String(existing).trim();
+  if (useExisting && !(await localBranchExists(project, useExisting)))
+    return res
+      .status(400)
+      .json({ error: "no such branch — only existing claude/* branches can be selected" });
+  const thread = db.createThread(
+    project, squash(prompt), !!plan, normalizeModel(model), !useExisting && !!direct
+  );
   // Each request gets its own git branch; ingest() creates/checks it out (and
   // self-heals to a plain run if the project isn't a git repo). A direct
   // ("no commits") request skips the branch entirely and runs in the main
-  // working tree, instructed to leave everything uncommitted.
+  // working tree, instructed to leave everything uncommitted. A request pinned
+  // to an existing branch reuses that branch (and its worktree) instead.
   let branch = null;
-  if (!direct) {
+  if (useExisting) {
+    branch = useExisting;
+    db.setThreadBranch(thread.id, branch);
+  } else if (!direct) {
     branch = branchNameFor(thread.title, thread.id);
     db.setThreadBranch(thread.id, branch);
   }
-  const sent = wrapPrompt(prompt, "new", { branch, direct: !!direct });
+  const sent = wrapPrompt(prompt, "new", { branch, direct: !branch && !!direct });
   const turn = db.addTurn(thread.id, prompt, sent, null);
   startRun(db.getThread(thread.id), turn, "new");
   res.json({ thread_id: thread.id, branch });

@@ -44,10 +44,10 @@ export const api = {
     req("/api/scheduler/config", { method: "PUT", body: JSON.stringify(patch) }),
 
   threads: (project: string) => req(`/api/threads?project=${encodeURIComponent(project)}`),
-  newThread: (project: string, prompt: string, plan = false, model = "", direct = false) =>
+  newThread: (project: string, prompt: string, plan = false, model = "", direct = false, branch = "") =>
     req("/api/threads", {
       method: "POST",
-      body: JSON.stringify({ project, prompt, plan, model, direct }),
+      body: JSON.stringify({ project, prompt, plan, model, direct, branch }),
     }),
   thread: (id: string) => req(`/api/thread?id=${encodeURIComponent(id)}`),
   threadRaw: (id: string) => req(`/api/thread/raw?id=${encodeURIComponent(id)}`),
