@@ -10,7 +10,7 @@ import {
   projectDockerStatus,
   projectContext,
 } from "./docker.js";
-import { branchNameFor, gitBranchInfo, gitDiff } from "./git.js";
+import { branchNameFor, gitBranchInfo, gitDiff, localBranchExists } from "./git.js";
 
 const router = Router();
 
@@ -83,16 +83,34 @@ router.get("/threads", (req, res) => {
   res.json({ threads: db.listThreads(String(req.query.project || "")) });
 });
 
-router.post("/threads", (req, res) => {
-  const { project, prompt, plan, model } = req.body || {};
+router.post("/threads", async (req, res) => {
+  const { project, prompt, plan, model, direct, branch: existing } = req.body || {};
   if (!project || !prompt || !prompt.trim())
     return res.status(400).json({ error: "project and prompt required" });
-  const thread = db.createThread(project, squash(prompt), !!plan, normalizeModel(model));
+  // An explicitly-picked existing branch is validated before the thread row is
+  // created (no orphan threads on a typo'd/deleted branch) and overrides direct.
+  const useExisting = existing && String(existing).trim();
+  if (useExisting && !(await localBranchExists(project, useExisting)))
+    return res
+      .status(400)
+      .json({ error: "no such branch — only existing claude/* branches can be selected" });
+  const thread = db.createThread(
+    project, squash(prompt), !!plan, normalizeModel(model), !useExisting && !!direct
+  );
   // Each request gets its own git branch; ingest() creates/checks it out (and
-  // self-heals to a plain run if the project isn't a git repo).
-  const branch = branchNameFor(thread.title, thread.id);
-  db.setThreadBranch(thread.id, branch);
-  const sent = wrapPrompt(prompt, "new", { branch });
+  // self-heals to a plain run if the project isn't a git repo). A direct
+  // ("no commits") request skips the branch entirely and runs in the main
+  // working tree, instructed to leave everything uncommitted. A request pinned
+  // to an existing branch reuses that branch (and its worktree) instead.
+  let branch = null;
+  if (useExisting) {
+    branch = useExisting;
+    db.setThreadBranch(thread.id, branch);
+  } else if (!direct) {
+    branch = branchNameFor(thread.title, thread.id);
+    db.setThreadBranch(thread.id, branch);
+  }
+  const sent = wrapPrompt(prompt, "new", { branch, direct: !branch && !!direct });
   const turn = db.addTurn(thread.id, prompt, sent, null);
   startRun(db.getThread(thread.id), turn, "new");
   res.json({ thread_id: thread.id, branch });
@@ -102,6 +120,8 @@ router.post("/thread/followup", (req, res) => {
   const { id, prompt, plan, model } = req.body || {};
   if (!db.getThread(id)) return res.status(404).json({ error: "no such thread" });
   if (!prompt || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
+  // A manual follow-up supersedes any night-scheduled approval of this thread.
+  db.cancelQueuedApprovals(id);
   // Approving a plan turns plan mode off so the resume run executes; any other
   // explicit value flips it too. Omitted → keep the thread's current mode.
   if (plan !== undefined) db.setThreadPlanMode(id, !!plan);
@@ -109,7 +129,10 @@ router.post("/thread/followup", (req, res) => {
   // omitted → keep whatever the thread already uses.
   if (model !== undefined) db.setThreadModel(id, normalizeModel(model));
   const thread = db.getThread(id);
-  const sent = wrapPrompt(prompt, "resume", { branch: thread.branch || null });
+  const sent = wrapPrompt(prompt, "resume", {
+    branch: thread.branch || null,
+    direct: !!thread.direct_mode,
+  });
   const turn = db.addTurn(thread.id, prompt, sent, null);
   db.setThreadStatus(thread.id, "running");
   startRun(thread, turn, "resume");
@@ -122,12 +145,33 @@ router.post("/thread/stop", async (req, res) => {
   res.json(await stopThread(id));
 });
 
+// Queue tonight's approval of the plan this thread is awaiting: instead of
+// running now, the night scheduler resumes this same session with plan mode
+// off once the window/idle/policy gates pass (scheduled_tasks kind 'approval').
+router.post("/thread/schedule_approval", (req, res) => {
+  const { id, prompt, agents } = req.body || {};
+  const thread = db.getThread(id);
+  if (!thread) return res.status(404).json({ error: "no such thread" });
+  if (thread.status !== "awaiting")
+    return res.status(409).json({ error: "thread is not awaiting approval" });
+  const existing = db.approvalTaskForThread(id);
+  if (existing) return res.json({ ok: true, task: existing });
+  const text =
+    (prompt && String(prompt).trim()) || "The plan is approved. Proceed and implement it.";
+  const task = db.addScheduled(thread.project, text, parseInt(agents, 10) || 1, {
+    kind: "approval",
+    thread_id: id,
+  });
+  res.json({ ok: true, task });
+});
+
 router.get("/thread", (req, res) => {
   const thread = db.getThread(String(req.query.id || ""));
   if (!thread) return res.status(404).json({ error: "no such thread" });
   db.markThreadRead(thread.id);
   res.json({
     thread,
+    scheduled_approval: db.approvalTaskForThread(thread.id) || null,
     turns: db.listTurns(thread.id),
     events: db.listEvents(thread.id, 0),
   });
@@ -313,6 +357,14 @@ router.post("/scheduled/:id/run", (req, res) => {
     db.updateScheduled(task.id, { agents: task.agents });
   }
   const thread = dispatchScheduled(task);
+  // An approval can decline to dispatch (its thread is busy or no longer
+  // awaiting) — surface why instead of crashing on thread.id.
+  if (!thread) {
+    const fresh = db.getScheduled(task.id);
+    return res
+      .status(409)
+      .json({ error: (fresh && fresh.error) || "not dispatchable right now — its thread is still running" });
+  }
   res.json({ ok: true, thread_id: thread.id });
 });
 

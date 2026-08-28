@@ -9,7 +9,20 @@ import ThreadDetail from "./components/ThreadDetail.vue";
 const store = useStore();
 const composer = ref("");
 const planMode = ref(false);
+// Where the request runs: "" = fresh claude/* branch, NO_BRANCH = main tree
+// with nothing committed (direct mode), anything else = that existing branch.
+const NO_BRANCH = "__none__";
+const branchMode = ref("");
 const noteText = ref("");
+
+const existingBranches = computed(() => store.gitInfo?.branches || []);
+watch(
+  () => store.currentProject,
+  () => {
+    branchMode.value = "";
+    if (store.currentProject) store.loadGitBranches();
+  }
+);
 
 // Model picker for the composer. "" = the CLI's configured default; the aliases
 // map to the latest of each tier, so they don't go stale. Choice is remembered.
@@ -22,7 +35,7 @@ const MODEL_OPTIONS = [
 const model = ref(localStorage.getItem("tmt2-model") || "");
 watch(model, (m) => localStorage.setItem("tmt2-model", m));
 
-// -- notes checklist (ported from the old viewer) ----------------------------
+// -- notes checklist ---------------------------------------------------------
 const CHECK_RE = /^(\s*)- \[( |~|x)\] (.*)$/;
 const MARK_CYCLE: Record<string, string> = { " ": "~", "~": "x", x: " " };
 const MARK_ICON: Record<string, string> = { " ": "", "~": "◐", x: "✓" };
@@ -82,8 +95,16 @@ onMounted(() => store.init());
 
 async function run() {
   const p = composer.value;
+  const mode = branchMode.value;
   composer.value = "";
-  await store.submit(p, planMode.value, model.value);
+  branchMode.value = "";
+  await store.submit(
+    p,
+    planMode.value,
+    model.value,
+    mode === NO_BRANCH,
+    mode && mode !== NO_BRANCH ? mode : ""
+  );
 }
 
 const win = (m: number) => store.usage.windows?.[m] || { tokens: 0, requests: 0 };
@@ -309,9 +330,26 @@ async function openReq(b: any, project = store.currentProject) {
             <input type="checkbox" v-model="planMode" />
             Plan mode
           </label>
+          <select
+            class="model-select"
+            v-model="branchMode"
+            title="Where the request runs: a fresh claude/* branch, the main tree with nothing committed, or an existing branch"
+          >
+            <option value="">New branch</option>
+            <option :value="NO_BRANCH">No branch / no commits</option>
+            <optgroup v-if="existingBranches.length" label="Existing branches">
+              <option v-for="b in existingBranches" :key="b.name" :value="b.name">
+                ⎇ {{ b.name }}
+              </option>
+            </optgroup>
+          </select>
           <span class="tokens">
             {{ planMode
               ? "Claude proposes a plan; you approve it here before it executes."
+              : branchMode === NO_BRANCH
+              ? "Edits the current checkout directly; no branch, nothing committed."
+              : branchMode
+              ? `Runs on the existing branch ${branchMode}, committing there.`
               : "Starts a new request in its own Claude session." }}
           </span>
         </div>
@@ -472,6 +510,7 @@ async function openReq(b: any, project = store.currentProject) {
           <div v-for="(t, i) in store.scheduled" :key="t.id" class="sched-task">
             <div class="sched-task-head">
               <span class="chip mono">{{ t.project }}</span>
+              <span v-if="t.kind === 'approval'" class="chip plan-chip" title="scheduled plan approval — resumes that request's session with the plan approved">◑ approval</span>
               <span class="chip" :class="'st-' + t.status">{{ t.status }}</span>
               <span class="tokens">· {{ t.agents }} agent{{ t.agents > 1 ? "s" : "" }}</span>
               <span class="sched-actions">
@@ -482,6 +521,7 @@ async function openReq(b: any, project = store.currentProject) {
                 <button class="n-linkbtn" @click="store.deleteScheduled(t.id)">✕</button>
               </span>
             </div>
+            <div v-if="t.kind === 'approval' && t.thread_title" class="tokens">plan of: {{ t.thread_title }}</div>
             <div class="sched-prompt">{{ t.prompt }}</div>
             <div v-if="t.error" class="tokens" style="color: var(--red)">{{ t.error }}</div>
           </div>
@@ -570,6 +610,19 @@ async function openReq(b: any, project = store.currentProject) {
                   {{ b.unpushed > 0 ? `↑ ${b.unpushed} to push` : "✓ pushed" }}
                 </span>
                 <span class="branch-actions">
+                  <a
+                    v-if="b.pr_url"
+                    class="n-linkbtn"
+                    :href="b.pr_url"
+                    target="_blank"
+                    rel="noopener"
+                    :title="b.unpushed > 0
+                      ? 'open a pull request on the remote — this branch still has unpushed commits, push first for them to show up'
+                      : 'open a pull request for this branch on the remote'"
+                    @click.stop
+                  >
+                    open PR ↗
+                  </a>
                   <button
                     v-if="b.thread_id"
                     class="n-linkbtn"

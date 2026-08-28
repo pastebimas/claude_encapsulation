@@ -296,6 +296,7 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
   font-size: 11px; padding: 0;
 }
 .n-linkbtn:hover { color: var(--accent); }
+a.n-linkbtn { text-decoration: none; }
 .n-progress {
   color: var(--muted); font-size: 11px; white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -381,6 +382,9 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12
 }
 .q-opt.approve { border-color: var(--green); color: var(--green); }
 .q-opt.approve:hover { background: var(--green); color: #fff; }
+.q-opt.night { border-color: var(--accent); color: var(--accent); }
+.q-opt.night:hover { background: var(--accent); color: #fff; }
+.q-opt.night.queued { border-style: dashed; }
 
 /* -- scheduler panel -- */
 .sched-config {

@@ -54,6 +54,16 @@ export function branchPromptNote(branch) {
   );
 }
 
+// The instruction for a "no commits" (direct) run: edit the current working
+// tree in place, leave everything uncommitted for the user.
+export function directPromptNote() {
+  return (
+    "Work directly in the project's current working tree and branch. Do NOT" +
+    " create, switch, or delete git branches, do NOT commit, and do NOT push —" +
+    " leave all changes uncommitted for the user to review and commit themselves."
+  );
+}
+
 export function git(project, args, user) {
   return execCollect(CODE_CONTAINER, ["git", "-C", `/workspace/${project}`, ...args], {
     user,
@@ -88,6 +98,20 @@ export async function ensureBranchRef(project, branch, user) {
     return { ok: true, reused: exists };
   } catch (e) {
     return { ok: false, code: 500, error: "git_error", detail: e.message };
+  }
+}
+
+// Whether an existing local claude/* branch may be targeted by a new request.
+// Read-only, so no exec user or identity setup needed. Never throws.
+export async function localBranchExists(project, branch, user) {
+  if (!SAFE_PROJECT.test(project) || !SAFE_BRANCH.test(branch)) return false;
+  try {
+    return (
+      (await git(project, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], user))
+        .exitCode === 0
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -173,6 +197,22 @@ export async function pruneWorktrees(project, user) {
 
 // -- read-only inspection for the dashboard Branches panel -------------------
 
+// "Create pull request" URL for a branch on a GitHub/Bitbucket remote. Built
+// from the remote URL alone, so it works whether or not the branch is pushed
+// yet — the host just shows nothing to compare until it is.
+export function prUrlFor(remoteUrl, branch) {
+  const m = /^(?:(?:https?|ssh|git):\/\/)?(?:[^@/]+@)?([^/:]+)[/:](.+?)(?:\.git)?\/?$/.exec(
+    String(remoteUrl || "").trim()
+  );
+  if (!m || !branch) return null;
+  const [, host, repoPath] = m;
+  if (/github/i.test(host))
+    return `https://${host}/${repoPath}/pull/new/${branch.split("/").map(encodeURIComponent).join("/")}`;
+  if (/bitbucket/i.test(host))
+    return `https://${host}/${repoPath}/pull-requests/new?source=${encodeURIComponent(branch)}&t=1`;
+  return null;
+}
+
 // One shell round-trip: current branch, dirty count, remote, and for every
 // claude/* branch its unpushed-commit count, latest commit, and the unpushed
 // commits themselves (capped). Tagged, 0x1f-delimited lines.
@@ -185,6 +225,7 @@ export async function gitBranchInfo(project) {
     `printf 'CURRENT\\037%s\\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"; ` +
     `printf 'DIRTY\\037%s\\n' "$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"; ` +
     `printf 'REMOTE\\037%s\\n' "$(git remote 2>/dev/null | head -n1)"; ` +
+    `printf 'REMOTE_URL\\037%s\\n' "$(git remote get-url "$(git remote 2>/dev/null | head -n1)" 2>/dev/null)"; ` +
     `git for-each-ref --format='%(refname:short)' refs/heads/claude/ 2>/dev/null | while IFS= read -r b; do ` +
     `[ -n "$b" ] || continue; ` +
     `up=$(git rev-list --count "$b" --not --remotes 2>/dev/null); ` +
@@ -202,7 +243,15 @@ export async function gitBranchInfo(project) {
   if (stdout.trim() === "NOREPO") return { available: true, is_repo: false, branches: [] };
 
   const map = new Map();
-  const info = { available: true, is_repo: true, current: "", dirty: 0, remote: "", branches: [] };
+  const info = {
+    available: true,
+    is_repo: true,
+    current: "",
+    dirty: 0,
+    remote: "",
+    remote_url: "",
+    branches: [],
+  };
   const ensure = (name) => {
     let b = map.get(name);
     if (!b) {
@@ -225,6 +274,9 @@ export async function gitBranchInfo(project) {
       case "REMOTE":
         info.remote = p[1] || "";
         break;
+      case "REMOTE_URL":
+        info.remote_url = p[1] || "";
+        break;
       case "BRANCH":
         ensure(p[1]).unpushed = parseInt(p[2] || "0", 10) || 0;
         break;
@@ -238,6 +290,7 @@ export async function gitBranchInfo(project) {
   }
   // Most-recently-touched branch first.
   info.branches.sort((a, b) => (b.last?.date || "").localeCompare(a.last?.date || ""));
+  for (const b of info.branches) b.pr_url = prUrlFor(info.remote_url, b.name);
   return info;
 }
 

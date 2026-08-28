@@ -57,7 +57,7 @@ export function addNote(project, { title = "", body = "", origin = "user", sessi
 }
 
 // Rewrite an existing note's body/title (checkbox toggles rewrite the whole
-// body string, same as the old viewer). Only the fields provided are changed.
+// body string). Only the fields provided are changed.
 export function updateNote(project, id, { body = null, title = null }) {
   const db = openProject(project);
   if (!db) return false;
@@ -115,7 +115,7 @@ export function latestRateLimit(project) {
   }
 }
 
-// token usage expression, mirroring the old viewer's json_extract approach.
+// token usage expression: json_extract over the proxy's logged request rows.
 const TOK_FIELDS = [
   ["input_tokens", "input_tokens"],
   ["output_tokens", "output_tokens"],

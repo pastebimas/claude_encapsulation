@@ -10,7 +10,7 @@ import {
   resolveExecUser,
 } from "./docker.js";
 import { addNote } from "./projects.js";
-import { ensureWorktree, removeWorktree, branchNameFor, branchPromptNote } from "./git.js";
+import { ensureWorktree, removeWorktree, branchNameFor, branchPromptNote, directPromptNote } from "./git.js";
 import * as db from "./db.js";
 
 export const bus = new EventEmitter();
@@ -49,6 +49,16 @@ const RUN_NO_QUESTIONS =
     " can reasonably decide yourself.";
 
 const LIMIT_RE = /(?:session|usage|rate)[ _-]?limit|limit reached|hit your .{0,20}limit/i;
+// Transient infrastructure failures worth an automatic retry: API/proxy 5xx
+// (e.g. "API Error: 500 Proxy error: 400 … Can not decode content-encoding:
+// brotli"), overload, or a dropped connection.
+const TRANSIENT_RE =
+  /API Error:\s*5\d\d|Proxy error:|Can not decode content-encoding|overloaded_error|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up/i;
+const RETRY_MINUTES = parseInt(process.env.RUN_TRANSIENT_RETRY_MINUTES || "10", 10);
+const RETRY_MAX = parseInt(process.env.RUN_TRANSIENT_RETRY_MAX || "3", 10);
+export const AUTO_RETRY_PROMPT =
+  "The previous attempt failed with a transient API/proxy error. Try again:" +
+  " continue the task from where it left off and carry it through to completion.";
 const NOTES_MARKER_RE = /^NOTES:[ \t]*(.*)$/im;
 const QUESTION_MARKER_RE = /^QUESTION:[ \t]*(.*)$/im;
 const PLAN_OPTIONS = ["✓ Approve & run", "Revise the plan"];
@@ -103,7 +113,9 @@ export function wrapPrompt(userText, kind, opts = {}) {
   if (kind === "new" && RUN_PROMPT_SUFFIX) body = `${body}\n\n${RUN_PROMPT_SUFFIX}`;
   // When the run is scoped to a git branch, remind Claude to stay on it and
   // commit locally (applies to both the first run and any resume/followup).
+  // Direct ("no commits") threads get the opposite instruction instead.
   if (opts.branch) body = `${body}\n\n${branchPromptNote(opts.branch)}`;
+  else if (opts.direct) body = `${body}\n\n${directPromptNote()}`;
   return RUN_NO_QUESTIONS ? `${RUN_NO_QUESTIONS}\n\n${body}` : body;
 }
 
@@ -173,9 +185,13 @@ function agentsSuffix(n) {
   );
 }
 
-// Dispatch a queued scheduled task as its own thread. Reuses the normal run
-// path; only the prompt wrapping differs (unattended + optional subagents).
+// Dispatch a queued scheduled task. kind 'prompt' runs as its own new thread;
+// kind 'approval' resumes the awaiting thread whose plan the user scheduled
+// for tonight. Reuses the normal run path; only the prompt wrapping differs
+// (unattended + optional subagents). Returns the thread, or null when nothing
+// was dispatched.
 export function dispatchScheduled(task) {
+  if (task.kind === "approval") return dispatchApproval(task);
   const thread = db.createThread(task.project, squashTitle(task.prompt));
   const branch = branchNameFor(thread.title, thread.id);
   db.setThreadBranch(thread.id, branch);
@@ -193,6 +209,40 @@ export function dispatchScheduled(task) {
   });
   // Re-fetch so the run carries the branch we just stored.
   startRun(db.getThread(thread.id), turn, "new");
+  return thread;
+}
+
+// Scheduled plan approval: resume the thread's session with plan mode off so
+// the approved plan executes overnight. A still-running thread keeps the task
+// queued for a later tick; a thread that is gone or no longer awaiting ends it.
+function dispatchApproval(task) {
+  const thread = task.thread_id ? db.getThread(task.thread_id) : null;
+  if (!thread) {
+    db.updateScheduled(task.id, { status: "failed", error: "thread missing", finished_at: db.now() });
+    return null;
+  }
+  if (thread.status === "running") return null;
+  // 'stale' still resumes: a restart marked it stale while the approval was
+  // queued, but the CLI session itself is resumable.
+  if (thread.status !== "awaiting" && thread.status !== "stale") {
+    db.updateScheduled(task.id, {
+      status: "canceled",
+      error: `thread is ${thread.status}, no longer awaiting approval`,
+      finished_at: db.now(),
+    });
+    return null;
+  }
+  db.setThreadPlanMode(thread.id, false);
+  const parts = [RUN_UNATTENDED];
+  const as = agentsSuffix(task.agents);
+  if (as) parts.push(as);
+  if (RUN_PROMPT_SUFFIX) parts.push(RUN_PROMPT_SUFFIX);
+  if (thread.branch) parts.push(branchPromptNote(thread.branch));
+  const sent = `${parts.join("\n\n")}\n\n${task.prompt}`;
+  const turn = db.addTurn(thread.id, task.prompt, sent, null);
+  db.setThreadStatus(thread.id, "running");
+  db.updateScheduled(task.id, { status: "running", started_at: db.now() });
+  startRun(db.getThread(thread.id), turn, "resume");
   return thread;
 }
 
@@ -427,13 +477,22 @@ async function ingest(thread, turn, runId, kind) {
     error: status === "error" ? errText || `exit ${exitCode}` || null : null,
   };
 
-  // usage-limit detection → mark resumable + schedule.
+  // usage-limit / transient-error detection → mark resumable + schedule. The
+  // retry loop (startRetryLoop) picks runs up once resume_at passes. Only an
+  // errored run schedules a retry — a successful result may merely *quote* an
+  // error string (e.g. a task about fixing one).
   const haystack = `${errText}\n${ctx.resultText || ""}`;
   if (!wasStopped && LIMIT_RE.test(haystack)) {
     fields.limit_hit = 1;
     fields.resume_at = new Date(
       Date.now() + parseInt(process.env.RUN_LIMIT_RETRY_MINUTES || "30", 10) * 60000
     ).toISOString();
+  } else if (
+    status === "error" &&
+    TRANSIENT_RE.test(haystack) &&
+    db.countTurnsWithText(thread.id, AUTO_RETRY_PROMPT) < RETRY_MAX
+  ) {
+    fields.resume_at = new Date(Date.now() + RETRY_MINUTES * 60000).toISOString();
   }
 
   db.updateRun(runId, fields);
@@ -468,8 +527,9 @@ async function ingest(thread, turn, runId, kind) {
   bus.emit(thread.id, { t: "done" });
 
   // Reclaim the worktree once the thread is terminal; keep it while awaiting a
-  // follow-up so the resume is instant. Branch + commits remain in .git.
-  if (thread.branch && !awaiting)
+  // follow-up (or an auto-retry) so the resume is instant and uncommitted work
+  // survives. Branch + commits remain in .git.
+  if (thread.branch && !awaiting && !fields.resume_at)
     removeWorktree(thread.project, thread.branch, user).catch(() => {});
 
   execCollect(CODE_CONTAINER, ["rm", "-f", outFile, errFile]).catch(() => {});
@@ -495,6 +555,38 @@ async function gitPull(thread, turnId, runId, user, workdir) {
     name: "git_pull",
     text: out || "already up to date",
   });
+}
+
+// -- auto-retry loop ---------------------------------------------------------
+// Consumes errored runs whose resume_at has passed (usage limit or transient
+// API/proxy failure) and resumes their thread with a "try again" follow-up.
+// DB-driven, so pending retries survive a server restart.
+export function startRetryLoop() {
+  setInterval(retryTick, 60_000);
+  console.log("auto-retry loop started");
+}
+
+function retryTick() {
+  try {
+    for (const run of db.dueRetryRuns()) {
+      // One shot per scheduled retry — clear before dispatch so a failure in
+      // startRun can't loop every tick.
+      db.updateRun(run.id, { resume_at: null });
+      const thread = db.getThread(run.thread_id);
+      if (!thread || thread.status === "running" || thread.status === "awaiting") continue;
+      // The user (or another retry) already moved the thread past this run.
+      const latest = db.latestRun(thread.id);
+      if (!latest || latest.id !== run.id) continue;
+      const sent = wrapPrompt(AUTO_RETRY_PROMPT, "resume", { branch: thread.branch || null });
+      const turn = db.addTurn(thread.id, AUTO_RETRY_PROMPT, sent, null);
+      db.setThreadStatus(thread.id, "running");
+      bus.emit(thread.id, { t: "status", status: "running" });
+      startRun(thread, turn, "resume");
+      console.log(`auto-retry: resuming thread ${thread.id} after run ${run.id} failed`);
+    }
+  } catch (e) {
+    console.error("retry tick:", e.message);
+  }
 }
 
 function saveNotes(thread, resultText) {

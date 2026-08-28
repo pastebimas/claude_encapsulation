@@ -211,9 +211,9 @@ export const useStore = defineStore("main", () => {
     }
   }
 
-  async function submit(prompt: string, plan = false, model = "") {
+  async function submit(prompt: string, plan = false, model = "", direct = false, branch = "") {
     if (!currentProject.value || !prompt.trim()) return;
-    const r = await api.newThread(currentProject.value, prompt.trim(), plan, model);
+    const r = await api.newThread(currentProject.value, prompt.trim(), plan, model, direct, branch);
     await loadThreads();
     await openThread(r.thread_id);
   }
@@ -224,6 +224,7 @@ export const useStore = defineStore("main", () => {
   function applyThreadData(r: any) {
     thread.value = r.thread;
     thread.value.awaiting = parseAwaiting(r.thread.awaiting_json);
+    thread.value.scheduled_approval = r.scheduled_approval || null;
     turns.value = r.turns;
     events.value = r.events;
     maxSeq.value = r.events.length ? r.events[r.events.length - 1].seq : 0;
@@ -295,6 +296,18 @@ export const useStore = defineStore("main", () => {
   // Approve a plan: resume the session with plan mode OFF so it executes.
   async function approvePlan() {
     await followup("The plan is approved. Proceed and implement it.", false);
+  }
+  // Queue the approval for the night scheduler instead of running it now.
+  async function scheduleApprovalTonight() {
+    if (!currentThreadId.value) return;
+    const r = await api.scheduleApproval(currentThreadId.value);
+    if (thread.value) thread.value.scheduled_approval = r.task;
+  }
+  async function cancelScheduledApproval() {
+    const t: any = thread.value && thread.value.scheduled_approval;
+    if (!t) return;
+    await api.deleteScheduled(t.id);
+    if (thread.value) thread.value.scheduled_approval = null;
   }
   async function stop() {
     if (!currentThreadId.value) return;
@@ -422,7 +435,7 @@ export const useStore = defineStore("main", () => {
     init, doLogin, doLogout, toggleTheme,
     setProjectSort, setThreadSort, toggleUnreadOnly, markUnread, markRead,
     loadProjects, selectProject, loadThreads, loadStatus,
-    submit, openThread, followup, approvePlan, stop, loadRaw,
+    submit, openThread, followup, approvePlan, scheduleApprovalTonight, cancelScheduledApproval, stop, loadRaw,
     openPanel, closePanel, loadGitBranches, loadAllGitBranches, setGitScope,
     openAllBranches, openProjectBranches, loadDiff, addNote, updateNote, runNoteLine,
     loadScheduled, loadSchedulerConfig, saveSchedulerConfig,

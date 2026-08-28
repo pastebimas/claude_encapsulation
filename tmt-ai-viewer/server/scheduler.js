@@ -99,8 +99,11 @@ function reconcile() {
       db.updateScheduled(t.id, { status: "done", finished_at: db.now() });
     else if (s === "stopped")
       db.updateScheduled(t.id, { status: "canceled", finished_at: db.now() });
-    else if (s === "error" || s === "stale")
+    else if (s === "error" || s === "stale") {
+      // A transient-error auto-retry is queued — not final yet.
+      if (s === "error" && db.hasPendingRetry(t.thread_id)) continue;
       db.updateScheduled(t.id, { status: "failed", error: `run ${s}`, finished_at: db.now() });
+    }
   }
 }
 
@@ -128,10 +131,13 @@ async function tick() {
       const idle = (usageWindows().windows[cfg.idle_minutes]?.requests || 0) === 0;
       if (!idle) return;
     }
-    const task = db.nextQueued();
-    if (task) {
-      dispatchScheduled(task);
-      sessionActive = true;
+    // Walk the queue in order: an approval whose thread is still busy stays
+    // queued and must not block the tasks behind it.
+    for (const task of db.listQueued()) {
+      if (dispatchScheduled(task)) {
+        sessionActive = true;
+        break;
+      }
     }
   } catch (e) {
     console.error("scheduler tick:", e.message);

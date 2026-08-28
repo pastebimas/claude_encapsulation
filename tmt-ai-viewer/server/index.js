@@ -6,6 +6,7 @@ import { markStaleOnBoot } from "./db.js";
 import { authMiddleware } from "./auth.js";
 import routes from "./routes.js";
 import { startScheduler } from "./scheduler.js";
+import { startRetryLoop } from "./claude.js";
 import { startTaskApi } from "./taskApi.js";
 import { pruneWorktrees } from "./git.js";
 import { listWorkspaceProjects, resolveExecUser } from "./docker.js";
@@ -32,9 +33,10 @@ if (fs.existsSync(DIST)) {
   );
 }
 
-app.listen(PORT, "0.0.0.0", () => console.log(`tmt-ai-viewer2 on :${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`tmt-ai-viewer on :${PORT}`));
 
 startScheduler();
+startRetryLoop();
 
 // Public task-dispatch API on its own port (off unless TASK_API_TOKEN is set).
 startTaskApi();

@@ -27,10 +27,10 @@ services:
       - tmt-ai-proxy
     restart: unless-stopped
 
-  tmt-ai-viewer2:
+  tmt-ai-viewer:
     build:
-      context: ./tmt-ai-viewer2
-    container_name: tmt-ai-viewer2
+      context: ./tmt-ai-viewer
+    container_name: tmt-ai-viewer
     ports:
       - "8035:8035"
       - "${TASK_API_BIND:-127.0.0.1}:${TASK_API_PORT:-8036}:8036"
