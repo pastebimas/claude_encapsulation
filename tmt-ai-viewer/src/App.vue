@@ -35,7 +35,7 @@ const MODEL_OPTIONS = [
 const model = ref(localStorage.getItem("tmt2-model") || "");
 watch(model, (m) => localStorage.setItem("tmt2-model", m));
 
-// -- notes checklist (ported from the old viewer) ----------------------------
+// -- notes checklist ---------------------------------------------------------
 const CHECK_RE = /^(\s*)- \[( |~|x)\] (.*)$/;
 const MARK_CYCLE: Record<string, string> = { " ": "~", "~": "x", x: " " };
 const MARK_ICON: Record<string, string> = { " ": "", "~": "◐", x: "✓" };
