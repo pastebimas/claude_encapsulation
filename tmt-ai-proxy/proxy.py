@@ -28,6 +28,24 @@ DATA_DIR = pathlib.Path(os.getenv("DATA_DIR", "/data"))
 PROJECT_ROOT = os.getenv("PROJECT_ROOT", "/workspace").rstrip("/")
 DEFAULT_PROJECT = os.getenv("DEFAULT_PROJECT", "default")
 
+# aiohttp transparently decompresses the upstream response before we ever see
+# it, so we may only advertise encodings it can actually decode. Claude Code
+# asks for "gzip, deflate, br, zstd"; br needs the Brotli package (installed)
+# and zstd is unsupported by aiohttp 3.9 entirely -- letting either through
+# unhandled fails the whole request instead of just skipping compression.
+def _decodable_encodings() -> str:
+    encodings = ["gzip", "deflate"]
+    try:
+        import brotli  # noqa: F401
+
+        encodings.append("br")
+    except ImportError:
+        pass
+    return ", ".join(encodings)
+
+
+ACCEPT_ENCODING = _decodable_encodings()
+
 MIGRATIONS_DIR = pathlib.Path(__file__).parent / "migrations"
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 SENSITIVE_HEADERS = {
@@ -357,6 +375,15 @@ class ProjectLogger:
             raise
 
 
+# Anthropic's own error envelope, so the CLI prints the message instead of a
+# bare "Proxy error" body.
+def error_response(status: int, err_type: str, message: str) -> web.Response:
+    return web.json_response(
+        {"type": "error", "error": {"type": err_type, "message": message}},
+        status=status,
+    )
+
+
 async def proxy_handler(request: web.Request) -> web.Response:
     logger: ProjectLogger = request.app["logger"]
     target_api_url: str = request.app["target_api_url"]
@@ -369,8 +396,10 @@ async def proxy_handler(request: web.Request) -> web.Response:
     forward_headers = {
         k: v
         for k, v in request.headers.items()
-        if k.lower() not in ("host", "connection", "keep-alive", "transfer-encoding")
+        if k.lower()
+        not in ("host", "connection", "keep-alive", "transfer-encoding", "accept-encoding")
     }
+    forward_headers["Accept-Encoding"] = ACCEPT_ENCODING
 
     project = extract_project_name(request_body)
     session_id = request.headers.get("x-claude-code-session-id")
@@ -436,12 +465,26 @@ async def proxy_handler(request: web.Request) -> web.Response:
                     headers=response_headers,
                     body=response_body,
                 )
+    except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+        # Genuinely transient: upstream unreachable / dropped. 5xx so the client
+        # retries.
+        print(f"Upstream connection error: {e}")
+        return error_response(
+            502, "api_error", f"tmt-ai-proxy could not reach {target_api_url}: {e}"
+        )
     except Exception as e:
+        # A fault in the proxy itself. Retrying re-runs the same broken path and
+        # burns tokens, so answer with a non-retryable 4xx to surface it at once.
         print(f"Error proxying request: {e}")
         import traceback
 
         traceback.print_exc()
-        return web.Response(status=500, text=f"Proxy error: {e}")
+        return error_response(
+            400,
+            "invalid_request_error",
+            f"tmt-ai-proxy failed to handle this request: {e} "
+            "(proxy-side fault, not retryable -- check `docker logs tmt-ai-proxy`)",
+        )
 
 
 async def health_check(request: web.Request) -> web.Response:
