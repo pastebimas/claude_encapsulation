@@ -47,6 +47,21 @@ const RUN_NO_QUESTIONS =
     "List 2–4 concrete options when you can. The user picks one (or types a free" +
     " answer) and you resume in the same session, so do not ask about anything you" +
     " can reasonably decide yourself.";
+// Injected into every dispatched run's prompt. Claude here is ALWAYS in a
+// throwaway local copy — never a real prod/stage server — so it must not try to
+// prove or disprove a remote issue from local state.
+const RUN_LOCAL_ENV_NOTE =
+  process.env.RUN_LOCAL_ENV_NOTE ??
+  "Environment: you are ALWAYS running inside a LOCAL development copy of this" +
+    " project — never on a real production or staging server. The checkout," +
+    " containers, config and databases around you are a throwaway local" +
+    " environment for building and testing features. When a request reports a bug" +
+    " or incident, especially if it cites a production/staging or any remote URL," +
+    " that problem lives on the REMOTE server you cannot see: do NOT try to" +
+    " confirm, reproduce or disprove it against the local config, local database" +
+    " or local services, and do NOT declare it fixed or not-a-bug based on local" +
+    " state. Reason about the remote behaviour from the code, build the fix or" +
+    " feature here, and test your own change locally.";
 
 // Cost ceilings, in USD. The per-run one is handed to the CLI as
 // --max-budget-usd (print mode only), which stops the run itself and reports it
@@ -146,7 +161,8 @@ export function wrapPrompt(userText, kind, opts = {}) {
   // Direct ("no commits") threads get the opposite instruction instead.
   if (opts.branch) body = `${body}\n\n${branchPromptNote(opts.branch)}`;
   else if (opts.direct) body = `${body}\n\n${directPromptNote()}`;
-  return RUN_NO_QUESTIONS ? `${RUN_NO_QUESTIONS}\n\n${body}` : body;
+  const lead = [RUN_NO_QUESTIONS, RUN_LOCAL_ENV_NOTE].filter(Boolean);
+  return lead.length ? `${lead.join("\n\n")}\n\n${body}` : body;
 }
 
 // Build the raw prompt for an external task-dispatch run (taskApi.js). The
@@ -226,6 +242,7 @@ export function dispatchScheduled(task) {
   const branch = branchNameFor(thread.title, thread.id);
   db.setThreadBranch(thread.id, branch);
   const parts = [RUN_UNATTENDED];
+  if (RUN_LOCAL_ENV_NOTE) parts.push(RUN_LOCAL_ENV_NOTE);
   const as = agentsSuffix(task.agents);
   if (as) parts.push(as);
   if (RUN_PROMPT_SUFFIX) parts.push(RUN_PROMPT_SUFFIX);
@@ -264,6 +281,7 @@ function dispatchApproval(task) {
   }
   db.setThreadPlanMode(thread.id, false);
   const parts = [RUN_UNATTENDED];
+  if (RUN_LOCAL_ENV_NOTE) parts.push(RUN_LOCAL_ENV_NOTE);
   const as = agentsSuffix(task.agents);
   if (as) parts.push(as);
   if (RUN_PROMPT_SUFFIX) parts.push(RUN_PROMPT_SUFFIX);
