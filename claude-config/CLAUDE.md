@@ -25,4 +25,4 @@
 
 ## Notes (tmt-ai dashboard)
 
-The dashboard no longer reads TaskCreate/TaskUpdate tool calls — use the task tools only for your own in-session tracking. If something extra pops up that is worth returning to later (follow-up work, proposals, ideas), end your final reply with a `NOTES:` section listing each item as a `- [ ] item` line. Dashboard-dispatched runs save that section to the project's notes automatically.
+The dashboard no longer reads TaskCreate/TaskUpdate tool calls — use the task tools only for your own in-session tracking. If something extra pops up that is worth returning to later (follow-up work, proposals, ideas), end your final reply with a `NOTES:` section listing each item as a `- [ ] item` line. When an interactive run finishes, the dashboard surfaces those items as a picker so the user can run any of them right away (each as its own request); whatever they don't pick is saved to the project's notes. Unattended (night-scheduler) runs skip the picker and save every item to notes automatically.
