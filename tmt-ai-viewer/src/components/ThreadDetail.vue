@@ -77,22 +77,16 @@ function tokenLine(ev: any) {
   if (ev.out_tokens) parts.push(`${ev.out_tokens} out`);
   if (ev.cache_read) parts.push(`${ev.cache_read} cache-read`);
   if (ev.cache_creation) parts.push(`${ev.cache_creation} cache-write`);
-  const cost = costOf(ev);
-  if (cost != null) parts.push(`$${cost.toFixed(2)}`);
   return parts.join(" · ");
 }
 
-// The CLI prices each run itself and puts it on the result record.
-function costOf(ev: any) {
-  try {
-    const d = JSON.parse(ev.data_json || "{}");
-    return typeof d.total_cost_usd === "number" ? d.total_cost_usd : null;
-  } catch {
-    return null;
-  }
+// Same unit the ceilings are counted in: everything except cache-read.
+function fmtTokens(n: any) {
+  const v = Math.round(Number(n) || 0);
+  if (v >= 1000000) return `${(v / 1000000).toFixed(v % 1000000 ? 1 : 0)}M`;
+  if (v >= 1000) return `${Math.round(v / 1000)}k`;
+  return String(v);
 }
-
-const money = (n: any) => `$${Number(n || 0).toFixed(2)}`;
 
 async function send() {
   const p = followupText.value;
@@ -226,20 +220,24 @@ watch(
         <div class="q-label">◔ Paused on its cost ceiling</div>
         <div class="q-text">
           <template v-if="awaitingBudget.reason === 'run'">
-            This run reached {{ money(awaitingBudget.run_cap) }} and stopped itself.
+            This run hit its {{ fmtTokens(awaitingBudget.run_cap) }} token ceiling and was stopped
+            at {{ fmtTokens(awaitingBudget.run_used) }}.
           </template>
           <template v-else>
-            This thread has used its {{ money(awaitingBudget.thread_cap) }} allowance, so nothing
-            was dispatched.
+            This thread has used its {{ fmtTokens(awaitingBudget.thread_cap) }} token allowance, so
+            nothing was dispatched.
           </template>
-          Spent on this thread so far: <b>{{ money(awaitingBudget.thread_spent) }}</b>.
+          Used on this thread so far: <b>{{ fmtTokens(awaitingBudget.thread_spent) }}</b>
+          (input + output + cache-write; cache-reads don't count).
         </div>
         <div class="q-options">
-          <button class="q-opt approve" @click="store.raiseBudget('add', 5)">Continue +$5</button>
-          <button class="q-opt" @click="store.raiseBudget('add', 20)">Continue +$20</button>
+          <button class="q-opt approve" @click="store.raiseBudget('add', 500000)">
+            Continue +500k
+          </button>
+          <button class="q-opt" @click="store.raiseBudget('add', 2000000)">Continue +2M</button>
           <button
             class="q-opt"
-            title="Remove both the per-run and per-thread ceilings for this thread"
+            title="Remove both the per-run and per-thread token ceilings for this thread"
             @click="store.raiseBudget('unlimited')"
           >
             No limit

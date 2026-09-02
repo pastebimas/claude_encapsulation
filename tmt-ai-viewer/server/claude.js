@@ -63,34 +63,49 @@ const RUN_LOCAL_ENV_NOTE =
     " state. Reason about the remote behaviour from the code, build the fix or" +
     " feature here, and test your own change locally.";
 
-// Cost ceilings, in USD. The per-run one is handed to the CLI as
-// --max-budget-usd (print mode only), which stops the run itself and reports it
-// as result.subtype 'error_max_budget_usd' -- no guessing from stderr. The
-// whole-thread one is ours: checked before dispatch and used to shrink the
-// per-run cap so a thread can't creep past it one run at a time. Either can be
-// overridden per thread from the dashboard; 0 anywhere means "no ceiling".
-const RUN_BUDGET_USD = parseFloat(process.env.RUN_BUDGET_USD ?? "5");
-const THREAD_BUDGET_USD = parseFloat(process.env.RUN_THREAD_BUDGET_USD ?? "20");
-const PLAN_BUDGET_USD = parseFloat(process.env.RUN_PLAN_BUDGET_USD ?? "2");
-// Finishing this close to the cap is worth flagging even though it completed.
+// Token ceilings. Counted as *new* tokens — input + output + cache-write,
+// deliberately excluding cache-read: every API call in an agentic loop re-reads
+// the whole cached context, so cache-read tracks conversation length rather than
+// work done (measured on this install: ~110k total vs ~1.7k new per request).
+// There is no --max-budget-tokens in the CLI, so ingest() counts the stream as
+// it arrives and stops the run itself. Either ceiling can be overridden per
+// thread from the dashboard; 0 anywhere means "no ceiling".
+const RUN_BUDGET_TOKENS = parseInt(process.env.RUN_BUDGET_TOKENS ?? "1000000", 10);
+const THREAD_BUDGET_TOKENS = parseInt(process.env.RUN_THREAD_BUDGET_TOKENS ?? "3000000", 10);
+const PLAN_BUDGET_TOKENS = parseInt(process.env.RUN_PLAN_BUDGET_TOKENS ?? "400000", 10);
+// Finishing this close to the ceiling is worth flagging even though it finished.
 const BUDGET_WARN_FRACTION = parseFloat(process.env.RUN_BUDGET_WARN_FRACTION ?? "0.8");
-const BUDGET_OPTIONS = ["Continue +$5", "Continue +$20", "No limit", "Leave it stopped"];
+const BUDGET_OPTIONS = ["Continue +500k", "Continue +2M", "No limit", "Leave it stopped"];
+
+export const fmtTokens = (n) => {
+  const v = Math.round(Number(n) || 0);
+  if (v >= 1000000) return `${(v / 1000000).toFixed(v % 1000000 ? 1 : 0)}M`;
+  if (v >= 1000) return `${Math.round(v / 1000)}k`;
+  return String(v);
+};
+
+// New tokens on one API response. Mirrors what ingest() accumulates live.
+export function newTokens(u) {
+  if (!u) return 0;
+  return (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_creation_input_tokens || 0);
+}
 
 // Resolve the ceilings that apply to this thread's next run.
 export function budgetFor(thread) {
-  const dflt = thread.plan_mode ? PLAN_BUDGET_USD : RUN_BUDGET_USD;
-  const run = thread.budget_usd == null ? dflt : thread.budget_usd;
-  const total = thread.budget_total_usd == null ? THREAD_BUDGET_USD : thread.budget_total_usd;
-  const spent = db.threadCost(thread.id);
+  const dflt = thread.plan_mode ? PLAN_BUDGET_TOKENS : RUN_BUDGET_TOKENS;
+  const run = thread.budget_tokens == null ? dflt : thread.budget_tokens;
+  const total =
+    thread.budget_total_tokens == null ? THREAD_BUDGET_TOKENS : thread.budget_total_tokens;
+  const spent = db.threadTokens(thread.id);
   const left = total > 0 ? Math.max(0, total - spent) : Infinity;
   // The run may never be allowed more than what is left of the thread ceiling.
   let cap = run > 0 ? run : Infinity;
   if (left < cap) cap = left;
   const unlimited = !Number.isFinite(cap);
-  // `unlimited` is what decides whether a --max-budget-usd flag is passed at
-  // all, so an exhausted thread can never be mistaken for an uncapped one: it
-  // gets a floor cap the run trips over at once. Fails closed, not open.
-  return { run, total, spent, left, unlimited, cap: unlimited ? 0 : Math.max(cap, 0.01) };
+  // `unlimited` is what decides whether a ceiling is enforced at all, so an
+  // exhausted thread can never be mistaken for an uncapped one: it gets a floor
+  // the run trips over at once. Fails closed, not open.
+  return { run, total, spent, left, unlimited, cap: unlimited ? 0 : Math.max(cap, 1) };
 }
 
 const LIMIT_RE = /(?:session|usage|rate)[ _-]?limit|limit reached|hit your .{0,20}limit/i;
@@ -301,9 +316,9 @@ function budgetAwaiting(thread, budget, spentThisRun) {
     budget: {
       reason: spentThisRun == null ? "thread" : "run",
       run_cap: budget.cap,
-      run_cost: spentThisRun,
+      run_used: spentThisRun,
       thread_cap: budget.total,
-      thread_spent: db.threadCost(thread.id),
+      thread_spent: db.threadTokens(thread.id),
     },
     options: BUDGET_OPTIONS,
   };
@@ -329,6 +344,8 @@ function ingestRecord(ctx, obj) {
     });
   } else if (type === "assistant" && obj.message) {
     const usage = obj.message.usage || {};
+    // Once per API response — the block loop below would multiply-count it.
+    ctx.tokens += newTokens(usage);
     for (const block of obj.message.content || []) {
       if (block.type === "text") {
         emitEvent({
@@ -377,9 +394,11 @@ function ingestRecord(ctx, obj) {
     ctx.resultJson = JSON.stringify(obj);
     ctx.resultText = obj.result || "";
     ctx.resultSubtype = obj.subtype || null;
-    // The CLI prices the run for us; never recompute it from tokens here.
-    ctx.costUsd = typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : null;
+    // The result record carries the run's own totals — more trustworthy than our
+    // running tally, so it wins whenever the run got far enough to emit one.
     const u = obj.usage || {};
+    ctx.tokensNew = newTokens(u);
+    ctx.tokensTotal = ctx.tokensNew + (u.cache_read_input_tokens || 0);
     emitEvent({
       ...common,
       type: "result",
@@ -403,7 +422,7 @@ function flattenToolResult(content) {
   return "";
 }
 
-function handleLine(ctx, line) {
+export function handleLine(ctx, line) {
   const s = line.trim();
   if (!s || s[0] !== "{") return;
   let obj;
@@ -414,6 +433,12 @@ function handleLine(ctx, line) {
   }
   ctx.processed++;
   ingestRecord(ctx, obj);
+  // Ceiling enforcement lives here rather than in a flag: the CLI has no token
+  // budget of its own, so the run is stopped the moment the stream crosses it.
+  if (!ctx.unlimited && !ctx.budgetKilled && ctx.tokens > ctx.cap) {
+    ctx.budgetKilled = true;
+    ctx.killOverBudget();
+  }
 }
 
 // Kick off a run for an already-created turn. Returns immediately; ingest runs
@@ -502,10 +527,8 @@ async function ingest(thread, turn, runId, kind) {
   // Plan mode: Claude researches and proposes a plan (via ExitPlanMode) instead
   // of editing; the dashboard surfaces it for approval.
   if (thread.plan_mode) args.push("--permission-mode", "plan");
-  // Hard cost ceiling for this run. The CLI stops itself on overrun and says so
-  // in the result record, so nothing here has to watch the stream.
+  // Ceiling for this run; handleLine() enforces it against the live stream.
   const budget = budgetFor(thread);
-  if (!budget.unlimited) args.push("--max-budget-usd", budget.cap.toFixed(4));
   // Fresh run: assign the session id up front so the thread maps immediately.
   // Resume: --resume alone continues that same session (passing --session-id
   // too is rejected unless --fork-session).
@@ -517,7 +540,26 @@ async function ingest(thread, turn, runId, kind) {
   // file, so if the socket-proxy drops a quiet stream we recover the tail.
   const shell = `${args.map(shq).join(" ")} 2>${shq(errFile)} | tee ${shq(outFile)}`;
 
-  const ctx = { threadId: thread.id, turnId: turn.id, runId, processed: 0, resultSeen: false };
+  const ctx = {
+    threadId: thread.id,
+    turnId: turn.id,
+    runId,
+    processed: 0,
+    resultSeen: false,
+    tokens: 0,
+    cap: budget.cap,
+    unlimited: budget.unlimited,
+    budgetKilled: false,
+    // Same mechanism as a user-requested stop: kill the CLI by its session id.
+    killOverBudget: () => {
+      console.log(
+        `run ${runId}: ${fmtTokens(ctx.tokens)} new tokens over the ${fmtTokens(budget.cap)} ceiling — stopping`
+      );
+      execCollect(CODE_CONTAINER, ["pkill", "-9", "-f", thread.session_id], { user }).catch(
+        () => {}
+      );
+    },
+  };
 
   const { exitCode, stderr, note } = await execStream(CODE_CONTAINER, ["sh", "-c", shell], {
     workdir,
@@ -546,10 +588,10 @@ async function ingest(thread, turn, runId, kind) {
   }
 
   const wasStopped = stopping.delete(runId);
-  // The run walked into its own --max-budget-usd ceiling. Not a failure and not
+  // handleLine() stopped the run at its token ceiling. Not a failure and not
   // worth retrying: it needs a decision from the user, so it gets its own status
   // and skips the transient-retry path below.
-  const budgetStop = ctx.resultSubtype === "error_max_budget_usd";
+  const budgetStop = ctx.budgetKilled;
   const ok = exitCode === 0 && ctx.resultSeen;
   const status = wasStopped ? "stopped" : budgetStop ? "budget" : ok ? "done" : "error";
 
@@ -559,9 +601,11 @@ async function ingest(thread, turn, runId, kind) {
     finished_at: db.now(),
     stream_note: note,
     result_json: ctx.resultJson || null,
-    cost_usd: ctx.costUsd ?? null,
+    // A killed run never emits a result record, so fall back to the live tally.
+    tokens_new: ctx.tokensNew ?? ctx.tokens,
+    tokens_total: ctx.tokensTotal ?? ctx.tokens,
     error: budgetStop
-      ? `stopped at the $${budget.cap.toFixed(2)} ceiling for this run`
+      ? `stopped at this run's ${fmtTokens(budget.cap)} token ceiling`
       : status === "error"
         ? errText || `exit ${exitCode}` || null
         : null,
@@ -593,7 +637,7 @@ async function ingest(thread, turn, runId, kind) {
   // Either parks the thread as 'awaiting'; the answer/approval resumes it.
   let awaiting = null;
   if (budgetStop) {
-    awaiting = budgetAwaiting(thread, budget, ctx.costUsd);
+    awaiting = budgetAwaiting(thread, budget, ctx.tokensNew ?? ctx.tokens);
   } else if (ok && !wasStopped) {
     const question = parseQuestion(ctx.resultText) || ctx.askQuestion;
     if (question) {
@@ -608,7 +652,8 @@ async function ingest(thread, turn, runId, kind) {
   else db.setThreadStatus(thread.id, status);
 
   // Finished, but close enough to the ceiling that the next run may not fit.
-  if (!budgetStop && !budget.unlimited && ctx.costUsd >= budget.cap * BUDGET_WARN_FRACTION) {
+  const usedNew = ctx.tokensNew ?? ctx.tokens;
+  if (!budgetStop && !budget.unlimited && usedNew >= budget.cap * BUDGET_WARN_FRACTION) {
     emitEvent({
       thread_id: thread.id,
       turn_id: turn.id,
@@ -616,9 +661,9 @@ async function ingest(thread, turn, runId, kind) {
       type: "system",
       name: "budget_warn",
       text:
-        `this run cost $${ctx.costUsd.toFixed(2)} of its $${budget.cap.toFixed(2)} ceiling` +
+        `this run used ${fmtTokens(usedNew)} of its ${fmtTokens(budget.cap)} token ceiling` +
         (budget.total > 0
-          ? ` — $${db.threadCost(thread.id).toFixed(2)} of $${budget.total.toFixed(2)} used on this thread`
+          ? ` — ${fmtTokens(db.threadTokens(thread.id))} of ${fmtTokens(budget.total)} on this thread`
           : ""),
     });
   }

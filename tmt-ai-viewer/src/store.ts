@@ -223,7 +223,7 @@ export const useStore = defineStore("main", () => {
   // user turn is present before its response events stream in.
   function applyThreadData(r: any) {
     thread.value = r.thread;
-    thread.value.cost_usd = r.cost_usd ?? 0;
+    thread.value.tokens_used = r.tokens_used ?? 0;
     thread.value.awaiting = parseAwaiting(r.thread.awaiting_json);
     thread.value.scheduled_approval = r.scheduled_approval || null;
     turns.value = r.turns;

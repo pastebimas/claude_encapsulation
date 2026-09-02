@@ -140,7 +140,7 @@ router.post("/thread/followup", (req, res) => {
 });
 
 // Raise the ceiling a thread parked on, then carry on where it stopped.
-// mode 'add' grants `amount` more dollars, 'unlimited' removes both ceilings,
+// mode 'add' grants `amount` more tokens, 'unlimited' removes both ceilings,
 // 'stop' leaves it parked and just clears the card.
 router.post("/thread/budget", (req, res) => {
   const { id, mode, amount } = req.body || {};
@@ -156,12 +156,12 @@ router.post("/thread/budget", (req, res) => {
   if (mode === "unlimited") {
     db.setThreadBudget(id, { run: 0, total: 0 });
   } else {
-    const add = Number(amount);
+    const add = Math.round(Number(amount));
     if (!Number.isFinite(add) || add <= 0)
-      return res.status(400).json({ error: "amount must be a positive number" });
-    // Grant `add` more for this thread, and let a single run use all of it —
-    // otherwise the per-run cap would stop it short of the grant.
-    db.setThreadBudget(id, { run: add, total: db.threadCost(id) + add });
+      return res.status(400).json({ error: "amount must be a positive number of tokens" });
+    // Grant `add` more tokens to this thread, and let a single run use all of
+    // it — otherwise the per-run ceiling would stop it short of the grant.
+    db.setThreadBudget(id, { run: add, total: db.threadTokens(id) + add });
   }
 
   // Re-dispatch the turn that never got to run; if the parked run did happen,
@@ -215,7 +215,7 @@ router.get("/thread", (req, res) => {
   db.markThreadRead(thread.id);
   res.json({
     thread,
-    cost_usd: db.threadCost(thread.id),
+    tokens_used: db.threadTokens(thread.id),
     scheduled_approval: db.approvalTaskForThread(thread.id) || null,
     turns: db.listTurns(thread.id),
     events: db.listEvents(thread.id, 0),
