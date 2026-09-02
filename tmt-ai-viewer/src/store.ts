@@ -332,6 +332,17 @@ export const useStore = defineStore("main", () => {
     if (!currentThreadId.value) return;
     await api.stopThread(currentThreadId.value);
   }
+  // Resolve the suggestions picker: `run` = items to dispatch now; the rest are
+  // saved to notes server-side. Finishes this thread.
+  async function resolveSuggestions(run: string[]) {
+    if (!currentThreadId.value) return;
+    await api.resolveSuggestions(currentThreadId.value, run);
+    if (thread.value) {
+      thread.value.status = "done";
+      thread.value.awaiting = null;
+    }
+    await loadThreads();
+  }
 
   async function loadRaw() {
     if (!currentThreadId.value) return;
@@ -454,7 +465,7 @@ export const useStore = defineStore("main", () => {
     init, doLogin, doLogout, toggleTheme,
     setProjectSort, setThreadSort, toggleUnreadOnly, markUnread, markRead,
     loadProjects, selectProject, loadThreads, loadStatus,
-    submit, openThread, followup, approvePlan, raiseBudget, scheduleApprovalTonight, cancelScheduledApproval, stop, loadRaw,
+    submit, openThread, followup, approvePlan, raiseBudget, scheduleApprovalTonight, cancelScheduledApproval, stop, resolveSuggestions, loadRaw,
     openPanel, closePanel, loadGitBranches, loadAllGitBranches, setGitScope,
     openAllBranches, openProjectBranches, loadDiff, addNote, updateNote, runNoteLine,
     loadScheduled, loadSchedulerConfig, saveSchedulerConfig,

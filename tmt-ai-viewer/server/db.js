@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS settings (
 // ext_task_id / ext_task_source / branch: set when a thread was created by the
 //   external task-dispatch API (taskApi.js) — the caller's task id, where it
 //   came from, and the git branch the work is scoped to.
+// unattended: 1 → nobody is watching (night scheduler). Such runs auto-save
+//   their NOTES: trailer to notes instead of parking as an awaiting suggestions
+//   picker (there's no one to pick).
 // scheduled_tasks.kind: 'prompt' = fresh night task run as its own thread;
 //   'approval' = resume the awaiting thread in thread_id with its plan approved.
 // runs.tokens_new / tokens_total: what the run used. tokens_new is
@@ -122,6 +125,7 @@ for (const ddl of [
   "ALTER TABLE threads ADD COLUMN ext_task_source TEXT",
   "ALTER TABLE threads ADD COLUMN branch TEXT",
   "ALTER TABLE threads ADD COLUMN direct_mode INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE threads ADD COLUMN unattended INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE scheduled_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'",
   "ALTER TABLE runs ADD COLUMN tokens_new INTEGER",
   "ALTER TABLE runs ADD COLUMN tokens_total INTEGER",
@@ -288,6 +292,13 @@ export function createThread(project, title, planMode = false, model = null, dir
 
 export function setThreadPlanMode(id, on) {
   db.prepare("UPDATE threads SET plan_mode=? WHERE id=?").run(on ? 1 : 0, id);
+}
+
+// Mark a thread as unattended (night scheduler) so its finished runs auto-save
+// the NOTES: trailer instead of parking as a suggestions picker no one will act
+// on.
+export function setThreadUnattended(id) {
+  db.prepare("UPDATE threads SET unattended=1 WHERE id=?").run(id);
 }
 
 export function setThreadModel(id, model) {
