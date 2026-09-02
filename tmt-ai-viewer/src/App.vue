@@ -16,6 +16,8 @@ const branchMode = ref("");
 const noteText = ref("");
 
 const existingBranches = computed(() => store.gitInfo?.branches || []);
+// Non-claude local branches (dev, master, …) you can commit straight onto.
+const otherBranches = computed(() => store.gitInfo?.other_branches || []);
 watch(
   () => store.currentProject,
   () => {
@@ -333,13 +335,18 @@ async function openReq(b: any, project = store.currentProject) {
           <select
             class="model-select"
             v-model="branchMode"
-            title="Where the request runs: a fresh claude/* branch, the main tree with nothing committed, or an existing branch"
+            title="Where the request runs: a fresh claude/* branch, the main tree with nothing committed, an existing claude/* branch, or a base branch (dev/master) to commit straight onto"
           >
             <option value="">New branch</option>
             <option :value="NO_BRANCH">No branch / no commits</option>
             <optgroup v-if="existingBranches.length" label="Existing branches">
               <option v-for="b in existingBranches" :key="b.name" :value="b.name">
                 ⎇ {{ b.name }}
+              </option>
+            </optgroup>
+            <optgroup v-if="otherBranches.length" label="Other branches (commit here)">
+              <option v-for="name in otherBranches" :key="name" :value="name">
+                ⎇ {{ name }}
               </option>
             </optgroup>
           </select>
