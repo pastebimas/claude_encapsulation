@@ -19,7 +19,14 @@ const SAFE_BRANCH = /^claude\/[A-Za-z0-9._/-]+$/;
 // Broader than SAFE_BRANCH (which is claude/* only, for the read side): the run
 // path also creates task/* branches. Injection-safe (no quotes/spaces/;).
 const SAFE_REF = /^(claude|task)\/[A-Za-z0-9._/-]+$/;
+// Any existing local branch the user may target from the dashboard (dev, master,
+// release/x). Superset of SAFE_REF. No leading dash (else git reads it as a
+// flag), no whitespace/quotes/;/$ — injection-safe for the `sh -c` scripts.
+const SAFE_ANY_BRANCH = /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/;
 const SAFE_SHA = /^[0-9a-fA-F]{4,40}$/;
+
+// Base branches surfaced first in the dashboard picker.
+const OTHER_BRANCH_PRIORITY = ["main", "master", "dev", "develop", "staging"];
 
 const FS = "\x1f"; // field separator for the branch-info script (unit separator)
 const DIFF_CAP = 200_000; // bytes of diff text returned to the browser
@@ -101,10 +108,12 @@ export async function ensureBranchRef(project, branch, user) {
   }
 }
 
-// Whether an existing local claude/* branch may be targeted by a new request.
-// Read-only, so no exec user or identity setup needed. Never throws.
+// Whether an existing local branch may be targeted by a new request. Accepts
+// any real branch name (claude/*, dev, master, …), not just claude/*, so a
+// request can commit straight onto a base branch. Read-only, so no exec user or
+// identity setup needed. Never throws.
 export async function localBranchExists(project, branch, user) {
-  if (!SAFE_PROJECT.test(project) || !SAFE_BRANCH.test(branch)) return false;
+  if (!SAFE_PROJECT.test(project) || !SAFE_ANY_BRANCH.test(branch || "")) return false;
   try {
     return (
       (await git(project, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], user))
@@ -130,7 +139,7 @@ const worktreeTail = (branch) => branch.replace(/\//g, "__").replace(/[^A-Za-z0-
 // to run in. On any failure returns { ok:false } so the caller falls back to
 // the main tree. Never throws.
 export async function ensureWorktree(project, branch, user) {
-  if (!SAFE_PROJECT.test(project) || !SAFE_REF.test(branch))
+  if (!SAFE_PROJECT.test(project) || !SAFE_ANY_BRANCH.test(branch))
     return { ok: false, error: "bad_args" };
   const wt = `${WORKTREES_DIR}/${worktreeTail(branch)}`;
   const excl = `${WORKTREES_DIR}/`;
@@ -164,7 +173,7 @@ export async function ensureWorktree(project, branch, user) {
 
 // Drop a run's worktree (branch + commits are preserved in .git). Best effort.
 export async function removeWorktree(project, branch, user) {
-  if (!SAFE_PROJECT.test(project) || !SAFE_REF.test(branch)) return;
+  if (!SAFE_PROJECT.test(project) || !SAFE_ANY_BRANCH.test(branch)) return;
   const wt = `${WORKTREES_DIR}/${worktreeTail(branch)}`;
   const script =
     `cd "/workspace/${project}" 2>/dev/null || exit 0; ` +
@@ -232,7 +241,10 @@ export async function gitBranchInfo(project) {
     `printf 'BRANCH\\037%s\\037%s\\n' "$b" "$up"; ` +
     `git log -1 --format='LAST%x1f'"$b"'%x1f%h%x1f%s%x1f%cI' "$b" 2>/dev/null; ` +
     `git log --format='COMMIT%x1f'"$b"'%x1f%h%x1f%s%x1f%cI' "$b" --not --remotes 2>/dev/null | head -n 50; ` +
-    `done`;
+    `done; ` +
+    // Every other local head (dev, master, release/*) so the dashboard picker can
+    // offer them as commit-straight-to targets. Names only; claude/task/* excluded.
+    `git for-each-ref --format='OTHER%x1f%(refname:short)' refs/heads/ 2>/dev/null`;
 
   let stdout = "";
   try {
@@ -251,7 +263,9 @@ export async function gitBranchInfo(project) {
     remote: "",
     remote_url: "",
     branches: [],
+    other_branches: [],
   };
+  const others = new Set();
   const ensure = (name) => {
     let b = map.get(name);
     if (!b) {
@@ -286,8 +300,18 @@ export async function gitBranchInfo(project) {
       case "COMMIT":
         ensure(p[1]).commits.push({ sha: p[2], subject: p[3], date: p[4] });
         break;
+      case "OTHER":
+        if (p[1] && !/^(claude|task)\//.test(p[1])) others.add(p[1]);
+        break;
     }
   }
+  // Base branches (main/master/dev/…) first, then the rest alphabetically.
+  info.other_branches = [...others].sort((a, b) => {
+    const pa = OTHER_BRANCH_PRIORITY.indexOf(a);
+    const pb = OTHER_BRANCH_PRIORITY.indexOf(b);
+    if (pa !== pb) return (pa === -1 ? 99 : pa) - (pb === -1 ? 99 : pb);
+    return a.localeCompare(b);
+  });
   // Most-recently-touched branch first.
   info.branches.sort((a, b) => (b.last?.date || "").localeCompare(a.last?.date || ""));
   for (const b of info.branches) b.pr_url = prUrlFor(info.remote_url, b.name);

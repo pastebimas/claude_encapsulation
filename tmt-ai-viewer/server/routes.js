@@ -93,7 +93,7 @@ router.post("/threads", async (req, res) => {
   if (useExisting && !(await localBranchExists(project, useExisting)))
     return res
       .status(400)
-      .json({ error: "no such branch — only existing claude/* branches can be selected" });
+      .json({ error: "no such branch — pick an existing local branch" });
   const thread = db.createThread(
     project, squash(prompt), !!plan, normalizeModel(model), !useExisting && !!direct
   );
