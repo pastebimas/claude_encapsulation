@@ -1,7 +1,7 @@
 import { Router } from "express";
 import * as db from "./db.js";
 import * as auth from "./auth.js";
-import { bus, startRun, wrapPrompt, stopThread, dispatchScheduled, normalizeModel } from "./claude.js";
+import { bus, startRun, wrapPrompt, stopThread, dispatchScheduled, dispatchNewThread, normalizeModel } from "./claude.js";
 import { schedulerConfig, saveSchedulerConfig, policyDecision } from "./scheduler.js";
 import { usageWindows, latestLimits } from "./usage.js";
 import { listNotes, addNote, updateNote } from "./projects.js";
@@ -10,7 +10,7 @@ import {
   projectDockerStatus,
   projectContext,
 } from "./docker.js";
-import { branchNameFor, gitBranchInfo, gitDiff, localBranchExists } from "./git.js";
+import { gitBranchInfo, gitDiff, localBranchExists } from "./git.js";
 
 const router = Router();
 
@@ -18,6 +18,28 @@ const squash = (s, n = 80) => {
   const t = (s || "").replace(/\s+/g, " ").trim();
   return t.length > n ? t.slice(0, n - 1) + "…" : t;
 };
+
+// Parse a thread's awaiting_json; return its suggestions[] or [].
+function awaitingSuggestions(thread) {
+  if (!thread || thread.status !== "awaiting" || !thread.awaiting_json) return [];
+  try {
+    const a = JSON.parse(thread.awaiting_json);
+    return Array.isArray(a.suggestions) ? a.suggestions : [];
+  } catch {
+    return [];
+  }
+}
+
+// Save a list of suggestion items to the project notes as open checklist lines.
+function saveSuggestionNotes(thread, items) {
+  if (!items.length) return;
+  addNote(thread.project, {
+    title: (thread.title || "").slice(0, 80),
+    body: items.map((t) => `- [ ] ${t}`).join("\n"),
+    origin: "agent",
+    session_id: thread.session_id,
+  });
+}
 
 // -- auth --------------------------------------------------------------------
 router.post("/login", auth.login);
@@ -94,32 +116,34 @@ router.post("/threads", async (req, res) => {
     return res
       .status(400)
       .json({ error: "no such branch — only existing claude/* branches can be selected" });
-  const thread = db.createThread(
-    project, squash(prompt), !!plan, normalizeModel(model), !useExisting && !!direct
-  );
-  // Each request gets its own git branch; ingest() creates/checks it out (and
-  // self-heals to a plain run if the project isn't a git repo). A direct
-  // ("no commits") request skips the branch entirely and runs in the main
-  // working tree, instructed to leave everything uncommitted. A request pinned
-  // to an existing branch reuses that branch (and its worktree) instead.
-  let branch = null;
+  // A request pinned to an existing branch reuses that branch (and its
+  // worktree). Otherwise dispatchNewThread creates its own claude/* branch —
+  // ingest() checks it out (self-healing to a plain run for non-git projects) —
+  // or, in direct ("no commits") mode, runs in the main tree uncommitted.
   if (useExisting) {
-    branch = useExisting;
-    db.setThreadBranch(thread.id, branch);
-  } else if (!direct) {
-    branch = branchNameFor(thread.title, thread.id);
-    db.setThreadBranch(thread.id, branch);
+    const thread = db.createThread(project, squash(prompt), !!plan, normalizeModel(model), false);
+    db.setThreadBranch(thread.id, useExisting);
+    const sent = wrapPrompt(prompt, "new", { branch: useExisting });
+    const turn = db.addTurn(thread.id, prompt, sent, null);
+    startRun(db.getThread(thread.id), turn, "new");
+    return res.json({ thread_id: thread.id, branch: useExisting });
   }
-  const sent = wrapPrompt(prompt, "new", { branch, direct: !branch && !!direct });
-  const turn = db.addTurn(thread.id, prompt, sent, null);
-  startRun(db.getThread(thread.id), turn, "new");
+  const { thread, branch } = dispatchNewThread(project, prompt, {
+    plan: !!plan,
+    model,
+    direct: !!direct,
+  });
   res.json({ thread_id: thread.id, branch });
 });
 
 router.post("/thread/followup", (req, res) => {
   const { id, prompt, plan, model } = req.body || {};
-  if (!db.getThread(id)) return res.status(404).json({ error: "no such thread" });
+  const existing = db.getThread(id);
+  if (!existing) return res.status(404).json({ error: "no such thread" });
   if (!prompt || !prompt.trim()) return res.status(400).json({ error: "prompt required" });
+  // A manual follow-up supersedes any pending suggestions picker — flush those
+  // items to notes so ignoring the picker never loses them.
+  saveSuggestionNotes(existing, awaitingSuggestions(existing));
   // A manual follow-up supersedes any night-scheduled approval of this thread.
   db.cancelQueuedApprovals(id);
   // Approving a plan turns plan mode off so the resume run executes; any other
@@ -137,6 +161,30 @@ router.post("/thread/followup", (req, res) => {
   db.setThreadStatus(thread.id, "running");
   startRun(thread, turn, "resume");
   res.json({ ok: true, turn_id: turn.id });
+});
+
+// Resolve a suggestions picker: dispatch the selected items as their own new
+// runs, save the rest to the project notes, and finish this thread. `run` is the
+// subset of the awaiting suggestions the user chose to run now.
+router.post("/thread/suggestions", (req, res) => {
+  const { id, run } = req.body || {};
+  const thread = db.getThread(id);
+  if (!thread) return res.status(404).json({ error: "no such thread" });
+  const suggestions = awaitingSuggestions(thread);
+  if (!suggestions.length)
+    return res.status(409).json({ error: "thread has no pending suggestions" });
+  const wanted = new Set(Array.isArray(run) ? run : []);
+  const selected = suggestions.filter((s) => wanted.has(s));
+  const leftover = suggestions.filter((s) => !wanted.has(s));
+  const dispatched = [];
+  for (const item of selected) {
+    const { thread: t } = dispatchNewThread(thread.project, item);
+    dispatched.push(t.id);
+  }
+  saveSuggestionNotes(thread, leftover);
+  db.setThreadStatus(thread.id, "done");
+  bus.emit(thread.id, { t: "status", status: "done" });
+  res.json({ ok: true, dispatched: dispatched.length, saved: leftover.length });
 });
 
 router.post("/thread/stop", async (req, res) => {

@@ -94,6 +94,31 @@ const awaiting = computed(() =>
 );
 const awaitingPlan = computed(() => awaiting.value && awaiting.value.plan != null);
 
+// Follow-up suggestions the run parked on (NOTES: trailer). The user checks the
+// ones to run now; the rest are saved to the project notes.
+const awaitingSuggestions = computed<string[] | null>(() =>
+  awaiting.value && Array.isArray(awaiting.value.suggestions) ? awaiting.value.suggestions : null
+);
+const sugSel = ref<boolean[]>([]);
+watch(
+  awaitingSuggestions,
+  (items) => {
+    sugSel.value = (items || []).map(() => false);
+  },
+  { immediate: true }
+);
+const sugSelectedCount = computed(() => sugSel.value.filter(Boolean).length);
+function sugSelectedItems() {
+  return (awaitingSuggestions.value || []).filter((_, i) => sugSel.value[i]);
+}
+async function runSelectedSuggestions() {
+  if (!sugSelectedCount.value) return;
+  await store.resolveSuggestions(sugSelectedItems());
+}
+async function saveAllSuggestions() {
+  await store.resolveSuggestions([]);
+}
+
 async function pick(option: string) {
   await store.followup(option);
 }
@@ -228,6 +253,30 @@ watch(
         </div>
         <div class="tokens" style="margin-top: 8px">
           Approve to run now, queue it for the night window, or type changes below to keep planning (stays in plan mode).
+        </div>
+      </div>
+
+      <!-- follow-up suggestions: run any now, save the rest to notes -->
+      <div v-else-if="awaitingSuggestions" class="question-card">
+        <div class="q-label">Claude suggested follow-ups — run any now?</div>
+        <div style="display: flex; flex-direction: column; gap: 6px; margin: 10px 0">
+          <label
+            v-for="(item, i) in awaitingSuggestions"
+            :key="i"
+            style="display: flex; gap: 8px; align-items: flex-start; cursor: pointer"
+          >
+            <input type="checkbox" v-model="sugSel[i]" style="margin-top: 3px" />
+            <span>{{ item }}</span>
+          </label>
+        </div>
+        <div class="q-options">
+          <button class="q-opt approve" :disabled="!sugSelectedCount" @click="runSelectedSuggestions()">
+            ▶ Run selected ({{ sugSelectedCount }})
+          </button>
+          <button class="q-opt" @click="saveAllSuggestions()">Save all to notes</button>
+        </div>
+        <div class="tokens" style="margin-top: 8px">
+          Checked items run now, each as its own request; the rest are saved to the project notes.
         </div>
       </div>
 
