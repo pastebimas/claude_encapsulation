@@ -340,6 +340,8 @@ a.n-linkbtn { text-decoration: none; }
 
 .git-pull { font-family: ui-monospace, monospace; opacity: .85; margin: 2px 0; }
 .budget-warn { font-family: ui-monospace, monospace; color: var(--amber); margin: 2px 0; }
+.role .when { float: right; font-weight: 400; opacity: .6; font-size: 11px; }
+.tokens .dim { opacity: .65; }
 .budget-card { border-color: var(--amber); }
 
 /* -- limit chips in the usage bar -- */

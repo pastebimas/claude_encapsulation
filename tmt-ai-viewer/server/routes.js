@@ -141,7 +141,8 @@ router.post("/thread/followup", (req, res) => {
 
 // Raise the ceiling a thread parked on, then carry on where it stopped.
 // mode 'add' grants `amount` more tokens, 'unlimited' removes both ceilings,
-// 'stop' leaves it parked and just clears the card.
+// 'compact' grants the same as 'add' but shrinks the session first so the grant
+// goes further, 'stop' leaves it parked and just clears the card.
 router.post("/thread/budget", (req, res) => {
   const { id, mode, amount } = req.body || {};
   const thread = db.getThread(id);
@@ -156,7 +157,7 @@ router.post("/thread/budget", (req, res) => {
   if (mode === "unlimited") {
     db.setThreadBudget(id, { run: 0, total: 0 });
   } else {
-    const add = Math.round(Number(amount));
+    const add = Math.round(Number(amount)) || (mode === "compact" ? 500000 : NaN);
     if (!Number.isFinite(add) || add <= 0)
       return res.status(400).json({ error: "amount must be a positive number of tokens" });
     // Grant `add` more tokens to this thread, and let a single run use all of
@@ -179,7 +180,10 @@ router.post("/thread/budget", (req, res) => {
   }
   db.setThreadStatus(id, "running");
   bus.emit(id, { t: "status", status: "running" });
-  startRun(fresh, turn, hadRun ? "resume" : "new");
+  // Compacting only means anything on a session that already exists.
+  startRun(fresh, turn, hadRun ? "resume" : "new", {
+    compact: mode === "compact" && hadRun,
+  });
   res.json({ ok: true, resumed: true, turn_id: turn.id });
 });
 

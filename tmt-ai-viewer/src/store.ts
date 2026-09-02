@@ -300,7 +300,10 @@ export const useStore = defineStore("main", () => {
   }
   // The thread parked on a cost ceiling. Grant it more (or drop the ceiling
   // entirely) and it picks up the turn it stopped on; 'stop' just leaves it.
-  async function raiseBudget(mode: "add" | "unlimited" | "stop", amount?: number) {
+  async function raiseBudget(
+    mode: "add" | "unlimited" | "stop" | "compact",
+    amount?: number
+  ) {
     if (!currentThreadId.value) return;
     const id = currentThreadId.value;
     const r = await api.threadBudget(id, mode, amount);

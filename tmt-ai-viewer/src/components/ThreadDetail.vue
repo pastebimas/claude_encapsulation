@@ -60,7 +60,49 @@ function layout(evs: any[]) {
     finalText = resultEv ? resultEv.text : null;
     for (const e of evs) if (e.type !== "result") progress.push(e);
   }
-  return { progress, finalText, resultEv };
+  return { progress, finalText, resultEv, usage: usage(resultEv) };
+}
+
+// DB timestamps are UTC ISO; older rows may lack the Z, so pin it on.
+const asDate = (ts: string) => new Date(ts + (ts.endsWith("Z") ? "" : "Z"));
+
+// Clock time for same-day, date + clock once it is older, so old and new are
+// distinguishable at a glance. Full stamp lives in the title attribute.
+function when(ts: string) {
+  if (!ts) return "";
+  const d = asDate(ts);
+  const today = new Date().toDateString() === d.toDateString();
+  const clock = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return today ? clock : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${clock}`;
+}
+
+function fullTime(ts: string) {
+  return ts ? asDate(ts).toLocaleString() : "";
+}
+
+function ago(ts: string) {
+  if (!ts) return "";
+  const d = (Date.now() - asDate(ts).getTime()) / 1000;
+  if (d < 60) return `${Math.floor(d)}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+
+const n = (v: any) => Number(v || 0).toLocaleString();
+
+// What one request used. `used` is the figure the ceilings count — input +
+// output + cache-write — kept apart from cache-read, which is shown but never
+// counted (it is the same context being re-read, not new work).
+function usage(ev: any) {
+  if (!ev) return null;
+  const inn = ev.in_tokens || 0;
+  const out = ev.out_tokens || 0;
+  const cacheWrite = ev.cache_creation || 0;
+  const cacheRead = ev.cache_read || 0;
+  const used = inn + out + cacheWrite;
+  if (!used && !cacheRead) return null;
+  return { used, in: inn, out, cacheWrite, cacheRead };
 }
 
 function prettyInput(data_json: string) {
@@ -69,15 +111,6 @@ function prettyInput(data_json: string) {
   } catch {
     return data_json;
   }
-}
-
-function tokenLine(ev: any) {
-  const parts: string[] = [];
-  if (ev.in_tokens) parts.push(`${ev.in_tokens} in`);
-  if (ev.out_tokens) parts.push(`${ev.out_tokens} out`);
-  if (ev.cache_read) parts.push(`${ev.cache_read} cache-read`);
-  if (ev.cache_creation) parts.push(`${ev.cache_creation} cache-write`);
-  return parts.join(" · ");
 }
 
 // Same unit the ceilings are counted in: everything except cache-read.
@@ -134,6 +167,13 @@ watch(
         <span v-if="store.thread.plan_mode" class="chip plan-chip">◑ plan</span>
         <span v-if="store.thread.model" class="chip mono">{{ store.thread.model }}</span>
         <span class="chip mono">session {{ store.thread.session_id.slice(0, 8) }}</span>
+        <span
+          v-if="store.thread.tokens_used"
+          class="chip mono"
+          title="Tokens used across this whole thread (input + output + cache-write). Cache-reads are not counted."
+        >
+          Σ {{ fmtTokens(store.thread.tokens_used) }} tokens
+        </span>
         <span v-if="store.thread.branch" class="chip mono" title="git branch this request works on">⎇ {{ store.thread.branch }}</span>
         <button
           class="btn"
@@ -166,7 +206,12 @@ watch(
     <div class="detail-body" v-if="store.detailTab === 'conversation'">
       <template v-for="b in blocks" :key="b.turn.id">
         <div class="msg user">
-          <div class="role">you</div>
+          <div class="role">
+            you
+            <span class="when" :title="fullTime(b.turn.created_at)">
+              {{ when(b.turn.created_at) }} · {{ ago(b.turn.created_at) }}
+            </span>
+          </div>
           <div class="content">{{ b.turn.user_text }}</div>
         </div>
 
@@ -197,17 +242,36 @@ watch(
               <div v-else-if="ev.type === 'system' && ev.name === 'budget_warn'" class="tokens budget-warn">
                 ◔ budget — {{ ev.text }}
               </div>
+              <div v-else-if="ev.type === 'system' && ev.name === 'compacted'" class="tokens git-pull">
+                ⤺ {{ ev.text }}
+              </div>
             </template>
           </div>
         </details>
 
         <!-- the result: final answer + token line -->
         <div v-if="b.layout.finalText != null" class="msg" :class="b.hasAssistantText ? 'assistant' : 'result'">
-          <div class="role">{{ b.hasAssistantText ? "claude" : "result" }}</div>
+          <div class="role">
+            {{ b.hasAssistantText ? "claude" : "result" }}
+            <span
+              v-if="b.layout.resultEv"
+              class="when"
+              :title="fullTime(b.layout.resultEv.ts)"
+            >
+              {{ when(b.layout.resultEv.ts) }} · {{ ago(b.layout.resultEv.ts) }}
+            </span>
+          </div>
           <div class="content">{{ b.layout.finalText }}</div>
         </div>
-        <div class="tokens" v-if="b.layout.resultEv && tokenLine(b.layout.resultEv)">
-          tokens: {{ tokenLine(b.layout.resultEv) }}
+        <div class="tokens" v-if="b.layout.usage">
+          <b>{{ n(b.layout.usage.used) }} tokens</b> this request
+          <span class="dim">
+            ({{ n(b.layout.usage.in) }} in · {{ n(b.layout.usage.out) }} out ·
+            {{ n(b.layout.usage.cacheWrite) }} cache-write)
+          </span>
+          <span class="dim" title="Re-read of the cached context — never counted toward a ceiling">
+            + {{ n(b.layout.usage.cacheRead) }} cache-read
+          </span>
         </div>
       </template>
 
@@ -215,9 +279,9 @@ watch(
         <span class="run-dot"></span> running…
       </div>
 
-      <!-- stopped on a cost ceiling -->
+      <!-- stopped on a token ceiling -->
       <div v-if="awaitingBudget" class="question-card budget-card">
-        <div class="q-label">◔ Paused on its cost ceiling</div>
+        <div class="q-label">◔ Paused on its token ceiling</div>
         <div class="q-text">
           <template v-if="awaitingBudget.reason === 'run'">
             This run hit its {{ fmtTokens(awaitingBudget.run_cap) }} token ceiling and was stopped
@@ -231,8 +295,15 @@ watch(
           (input + output + cache-write; cache-reads don't count).
         </div>
         <div class="q-options">
-          <button class="q-opt approve" @click="store.raiseBudget('add', 500000)">
-            Continue +500k
+          <button
+            class="q-opt approve"
+            title="Summarise the session down to its essentials, then continue with +500k. Cheaper on every later follow-up, because each resume re-caches the whole context once the prompt cache has expired."
+            @click="store.raiseBudget('compact', 500000)"
+          >
+            ⤺ Compact &amp; continue +500k
+          </button>
+          <button class="q-opt" @click="store.raiseBudget('add', 500000)">
+            Continue +500k (keep full history)
           </button>
           <button class="q-opt" @click="store.raiseBudget('add', 2000000)">Continue +2M</button>
           <button

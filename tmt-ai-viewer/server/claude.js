@@ -75,7 +75,13 @@ const THREAD_BUDGET_TOKENS = parseInt(process.env.RUN_THREAD_BUDGET_TOKENS ?? "3
 const PLAN_BUDGET_TOKENS = parseInt(process.env.RUN_PLAN_BUDGET_TOKENS ?? "400000", 10);
 // Finishing this close to the ceiling is worth flagging even though it finished.
 const BUDGET_WARN_FRACTION = parseFloat(process.env.RUN_BUDGET_WARN_FRACTION ?? "0.8");
-const BUDGET_OPTIONS = ["Continue +500k", "Continue +2M", "No limit", "Leave it stopped"];
+const BUDGET_OPTIONS = [
+  "Compact & continue",
+  "Continue +500k",
+  "Continue +2M",
+  "No limit",
+  "Leave it stopped",
+];
 
 export const fmtTokens = (n) => {
   const v = Math.round(Number(n) || 0);
@@ -443,7 +449,7 @@ export function handleLine(ctx, line) {
 
 // Kick off a run for an already-created turn. Returns immediately; ingest runs
 // in the background and streams to `bus`.
-export function startRun(thread, turn, kind) {
+export function startRun(thread, turn, kind, opts = {}) {
   // Thread ceiling already spent — park without dispatching, so hitting the
   // wall costs nothing. The turn stays run-less and /thread/budget re-dispatches
   // this same turn once the ceiling is raised.
@@ -457,7 +463,7 @@ export function startRun(thread, turn, kind) {
   }
   const runId = db.createRun(thread.id, turn.id, kind);
   db.setTurnRun(turn.id, runId);
-  ingest(thread, turn, runId, kind).catch((e) => {
+  ingest(thread, turn, runId, kind, opts).catch((e) => {
     console.error(`run ${runId} failed:`, e);
     db.updateRun(runId, {
       status: "error",
@@ -486,7 +492,7 @@ export async function stopThread(threadId) {
   return { ok: true };
 }
 
-async function ingest(thread, turn, runId, kind) {
+async function ingest(thread, turn, runId, kind, opts = {}) {
   const outFile = `/tmp/tmt2-${runId}.jsonl`;
   const errFile = `/tmp/tmt2-${runId}.err`;
   const user = await resolveExecUser();
@@ -536,9 +542,28 @@ async function ingest(thread, turn, runId, kind) {
   else args.push("--session-id", sid);
   args.push(turn.sent_text);
 
+  // Optional /compact pass first, in the same session. Worth it well below the
+  // window limit that triggers auto-compact: with follow-ups arriving after the
+  // prompt-cache TTL has expired, every resume re-caches the whole context, and
+  // cache-write is what the ceilings count. Its output is discarded — only the
+  // run proper streams to the parser.
+  const compactCmd = opts.compact
+    ? `${shq("claude")} -p --resume ${shq(sid)} ${shq("/compact")} >/dev/null 2>&1; `
+    : "";
+
   // tee: the exec's stdout (the attach stream we read live) also lands in a
   // file, so if the socket-proxy drops a quiet stream we recover the tail.
-  const shell = `${args.map(shq).join(" ")} 2>${shq(errFile)} | tee ${shq(outFile)}`;
+  const shell = `${compactCmd}${args.map(shq).join(" ")} 2>${shq(errFile)} | tee ${shq(outFile)}`;
+
+  if (opts.compact)
+    emitEvent({
+      thread_id: thread.id,
+      turn_id: turn.id,
+      run_id: runId,
+      type: "system",
+      name: "compacted",
+      text: "compacted the session before this run",
+    });
 
   const ctx = {
     threadId: thread.id,
