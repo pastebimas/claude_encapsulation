@@ -77,8 +77,22 @@ function tokenLine(ev: any) {
   if (ev.out_tokens) parts.push(`${ev.out_tokens} out`);
   if (ev.cache_read) parts.push(`${ev.cache_read} cache-read`);
   if (ev.cache_creation) parts.push(`${ev.cache_creation} cache-write`);
+  const cost = costOf(ev);
+  if (cost != null) parts.push(`$${cost.toFixed(2)}`);
   return parts.join(" · ");
 }
+
+// The CLI prices each run itself and puts it on the result record.
+function costOf(ev: any) {
+  try {
+    const d = JSON.parse(ev.data_json || "{}");
+    return typeof d.total_cost_usd === "number" ? d.total_cost_usd : null;
+  } catch {
+    return null;
+  }
+}
+
+const money = (n: any) => `$${Number(n || 0).toFixed(2)}`;
 
 async function send() {
   const p = followupText.value;
@@ -93,6 +107,7 @@ const awaiting = computed(() =>
   store.thread && store.thread.status === "awaiting" ? store.thread.awaiting : null
 );
 const awaitingPlan = computed(() => awaiting.value && awaiting.value.plan != null);
+const awaitingBudget = computed(() => (awaiting.value && awaiting.value.budget) || null);
 
 async function pick(option: string) {
   await store.followup(option);
@@ -185,6 +200,9 @@ watch(
               <div v-else-if="ev.type === 'system' && ev.name === 'git_pull'" class="tokens git-pull">
                 ⤓ git pull — {{ ev.text }}
               </div>
+              <div v-else-if="ev.type === 'system' && ev.name === 'budget_warn'" class="tokens budget-warn">
+                ◔ budget — {{ ev.text }}
+              </div>
             </template>
           </div>
         </details>
@@ -203,8 +221,38 @@ watch(
         <span class="run-dot"></span> running…
       </div>
 
+      <!-- stopped on a cost ceiling -->
+      <div v-if="awaitingBudget" class="question-card budget-card">
+        <div class="q-label">◔ Paused on its cost ceiling</div>
+        <div class="q-text">
+          <template v-if="awaitingBudget.reason === 'run'">
+            This run reached {{ money(awaitingBudget.run_cap) }} and stopped itself.
+          </template>
+          <template v-else>
+            This thread has used its {{ money(awaitingBudget.thread_cap) }} allowance, so nothing
+            was dispatched.
+          </template>
+          Spent on this thread so far: <b>{{ money(awaitingBudget.thread_spent) }}</b>.
+        </div>
+        <div class="q-options">
+          <button class="q-opt approve" @click="store.raiseBudget('add', 5)">Continue +$5</button>
+          <button class="q-opt" @click="store.raiseBudget('add', 20)">Continue +$20</button>
+          <button
+            class="q-opt"
+            title="Remove both the per-run and per-thread ceilings for this thread"
+            @click="store.raiseBudget('unlimited')"
+          >
+            No limit
+          </button>
+          <button class="q-opt" @click="store.raiseBudget('stop')">Leave it stopped</button>
+        </div>
+        <div class="tokens" style="margin-top: 8px">
+          Continuing picks up the same session where it stopped — no work is lost.
+        </div>
+      </div>
+
       <!-- a plan awaiting approval -->
-      <div v-if="awaitingPlan" class="question-card">
+      <div v-else-if="awaitingPlan" class="question-card">
         <div class="q-label">◑ Plan ready for your approval</div>
         <div class="content plan-text">{{ awaiting.plan }}</div>
         <div class="q-options">

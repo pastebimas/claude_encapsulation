@@ -61,6 +61,11 @@ export const api = {
         ...(model === undefined ? {} : { model }),
       }),
     }),
+  threadBudget: (id: string, mode: "add" | "unlimited" | "stop", amount?: number) =>
+    req("/api/thread/budget", {
+      method: "POST",
+      body: JSON.stringify({ id, mode, ...(amount === undefined ? {} : { amount }) }),
+    }),
   stopThread: (id: string) =>
     req("/api/thread/stop", { method: "POST", body: JSON.stringify({ id }) }),
   scheduleApproval: (id: string) =>

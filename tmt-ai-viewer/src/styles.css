@@ -339,6 +339,8 @@ a.n-linkbtn { text-decoration: none; }
 .question-card .q-opt:hover { border-color: var(--accent); }
 
 .git-pull { font-family: ui-monospace, monospace; opacity: .85; margin: 2px 0; }
+.budget-warn { font-family: ui-monospace, monospace; color: var(--amber); margin: 2px 0; }
+.budget-card { border-color: var(--amber); }
 
 /* -- limit chips in the usage bar -- */
 .lim-chip {

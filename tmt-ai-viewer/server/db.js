@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS settings (
 //   came from, and the git branch the work is scoped to.
 // scheduled_tasks.kind: 'prompt' = fresh night task run as its own thread;
 //   'approval' = resume the awaiting thread in thread_id with its plan approved.
+// runs.cost_usd: total_cost_usd off the run's own result record — no pricing
+//   table of ours, the CLI already computed it.
+// threads.budget_usd / budget_total_usd: per-run and whole-thread ceilings in
+//   USD. NULL = use the server default, 0 = no ceiling.
 for (const ddl of [
   "ALTER TABLE threads ADD COLUMN awaiting_json TEXT",
   "ALTER TABLE threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
@@ -118,6 +122,9 @@ for (const ddl of [
   "ALTER TABLE threads ADD COLUMN branch TEXT",
   "ALTER TABLE threads ADD COLUMN direct_mode INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE scheduled_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'prompt'",
+  "ALTER TABLE runs ADD COLUMN cost_usd REAL",
+  "ALTER TABLE threads ADD COLUMN budget_usd REAL",
+  "ALTER TABLE threads ADD COLUMN budget_total_usd REAL",
 ]) {
   try {
     db.exec(ddl);
@@ -323,7 +330,8 @@ export function getThread(id) {
 export function listThreads(project) {
   return db
     .prepare(
-      `SELECT id, project, session_id, title, status, plan_mode, model, branch, direct_mode, created_at, updated_at, read_at,
+      `SELECT id, project, session_id, title, status, plan_mode, model, branch, direct_mode,
+              budget_usd, budget_total_usd, created_at, updated_at, read_at,
               (read_at IS NULL OR updated_at > read_at) AS unread
        FROM threads WHERE project=? ORDER BY updated_at DESC`
     )
@@ -433,6 +441,33 @@ export function getRun(id) {
 export function latestRun(threadId) {
   return db
     .prepare("SELECT * FROM runs WHERE thread_id=? ORDER BY started_at DESC LIMIT 1")
+    .get(threadId);
+}
+
+// What this thread has cost so far, summed over its runs. Runs that never
+// reported a cost (stopped, crashed) count as 0.
+export function threadCost(threadId) {
+  return (
+    db
+      .prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM runs WHERE thread_id=?")
+      .get(threadId).c || 0
+  );
+}
+
+// Per-run / whole-thread ceilings. undefined leaves a field alone; null resets
+// it to the server default; 0 means "no ceiling".
+export function setThreadBudget(id, { run, total } = {}) {
+  if (run !== undefined)
+    db.prepare("UPDATE threads SET budget_usd=? WHERE id=?").run(run, id);
+  if (total !== undefined)
+    db.prepare("UPDATE threads SET budget_total_usd=? WHERE id=?").run(total, id);
+}
+
+// The thread's most recent turn — used to re-dispatch the turn that was parked
+// on a budget stop instead of appending a duplicate one.
+export function latestTurn(threadId) {
+  return db
+    .prepare("SELECT * FROM turns WHERE thread_id=? ORDER BY seq DESC LIMIT 1")
     .get(threadId);
 }
 

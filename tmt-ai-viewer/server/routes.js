@@ -139,6 +139,50 @@ router.post("/thread/followup", (req, res) => {
   res.json({ ok: true, turn_id: turn.id });
 });
 
+// Raise the ceiling a thread parked on, then carry on where it stopped.
+// mode 'add' grants `amount` more dollars, 'unlimited' removes both ceilings,
+// 'stop' leaves it parked and just clears the card.
+router.post("/thread/budget", (req, res) => {
+  const { id, mode, amount } = req.body || {};
+  const thread = db.getThread(id);
+  if (!thread) return res.status(404).json({ error: "no such thread" });
+
+  if (mode === "stop") {
+    db.setThreadStatus(id, "stopped");
+    bus.emit(id, { t: "status", status: "stopped" });
+    return res.json({ ok: true, resumed: false });
+  }
+
+  if (mode === "unlimited") {
+    db.setThreadBudget(id, { run: 0, total: 0 });
+  } else {
+    const add = Number(amount);
+    if (!Number.isFinite(add) || add <= 0)
+      return res.status(400).json({ error: "amount must be a positive number" });
+    // Grant `add` more for this thread, and let a single run use all of it —
+    // otherwise the per-run cap would stop it short of the grant.
+    db.setThreadBudget(id, { run: add, total: db.threadCost(id) + add });
+  }
+
+  // Re-dispatch the turn that never got to run; if the parked run did happen,
+  // carry on with a fresh continue turn in the same session.
+  const fresh = db.getThread(id);
+  const last = db.latestTurn(id);
+  const hadRun = !!db.latestRun(id);
+  let turn = last && !last.run_id ? last : null;
+  if (!turn) {
+    const text = "Continue the task from where it left off and carry it through to completion.";
+    turn = db.addTurn(id, text, wrapPrompt(text, "resume", {
+      branch: fresh.branch || null,
+      direct: !!fresh.direct_mode,
+    }), null);
+  }
+  db.setThreadStatus(id, "running");
+  bus.emit(id, { t: "status", status: "running" });
+  startRun(fresh, turn, hadRun ? "resume" : "new");
+  res.json({ ok: true, resumed: true, turn_id: turn.id });
+});
+
 router.post("/thread/stop", async (req, res) => {
   const { id } = req.body || {};
   if (!id) return res.status(400).json({ error: "id required" });
@@ -171,6 +215,7 @@ router.get("/thread", (req, res) => {
   db.markThreadRead(thread.id);
   res.json({
     thread,
+    cost_usd: db.threadCost(thread.id),
     scheduled_approval: db.approvalTaskForThread(thread.id) || null,
     turns: db.listTurns(thread.id),
     events: db.listEvents(thread.id, 0),

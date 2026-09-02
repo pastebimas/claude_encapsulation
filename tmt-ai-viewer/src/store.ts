@@ -223,6 +223,7 @@ export const useStore = defineStore("main", () => {
   // user turn is present before its response events stream in.
   function applyThreadData(r: any) {
     thread.value = r.thread;
+    thread.value.cost_usd = r.cost_usd ?? 0;
     thread.value.awaiting = parseAwaiting(r.thread.awaiting_json);
     thread.value.scheduled_approval = r.scheduled_approval || null;
     turns.value = r.turns;
@@ -297,6 +298,21 @@ export const useStore = defineStore("main", () => {
   async function approvePlan() {
     await followup("The plan is approved. Proceed and implement it.", false);
   }
+  // The thread parked on a cost ceiling. Grant it more (or drop the ceiling
+  // entirely) and it picks up the turn it stopped on; 'stop' just leaves it.
+  async function raiseBudget(mode: "add" | "unlimited" | "stop", amount?: number) {
+    if (!currentThreadId.value) return;
+    const id = currentThreadId.value;
+    const r = await api.threadBudget(id, mode, amount);
+    applyThreadData(await api.thread(id));
+    if (thread.value && r.resumed) {
+      thread.value.status = "running";
+      thread.value.awaiting = null;
+    }
+    await loadThreads();
+    if (r.resumed) startStream();
+  }
+
   // Queue the approval for the night scheduler instead of running it now.
   async function scheduleApprovalTonight() {
     if (!currentThreadId.value) return;
@@ -435,7 +451,7 @@ export const useStore = defineStore("main", () => {
     init, doLogin, doLogout, toggleTheme,
     setProjectSort, setThreadSort, toggleUnreadOnly, markUnread, markRead,
     loadProjects, selectProject, loadThreads, loadStatus,
-    submit, openThread, followup, approvePlan, scheduleApprovalTonight, cancelScheduledApproval, stop, loadRaw,
+    submit, openThread, followup, approvePlan, raiseBudget, scheduleApprovalTonight, cancelScheduledApproval, stop, loadRaw,
     openPanel, closePanel, loadGitBranches, loadAllGitBranches, setGitScope,
     openAllBranches, openProjectBranches, loadDiff, addNote, updateNote, runNoteLine,
     loadScheduled, loadSchedulerConfig, saveSchedulerConfig,

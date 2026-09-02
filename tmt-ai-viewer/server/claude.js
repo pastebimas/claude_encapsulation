@@ -48,6 +48,36 @@ const RUN_NO_QUESTIONS =
     " answer) and you resume in the same session, so do not ask about anything you" +
     " can reasonably decide yourself.";
 
+// Cost ceilings, in USD. The per-run one is handed to the CLI as
+// --max-budget-usd (print mode only), which stops the run itself and reports it
+// as result.subtype 'error_max_budget_usd' -- no guessing from stderr. The
+// whole-thread one is ours: checked before dispatch and used to shrink the
+// per-run cap so a thread can't creep past it one run at a time. Either can be
+// overridden per thread from the dashboard; 0 anywhere means "no ceiling".
+const RUN_BUDGET_USD = parseFloat(process.env.RUN_BUDGET_USD ?? "5");
+const THREAD_BUDGET_USD = parseFloat(process.env.RUN_THREAD_BUDGET_USD ?? "20");
+const PLAN_BUDGET_USD = parseFloat(process.env.RUN_PLAN_BUDGET_USD ?? "2");
+// Finishing this close to the cap is worth flagging even though it completed.
+const BUDGET_WARN_FRACTION = parseFloat(process.env.RUN_BUDGET_WARN_FRACTION ?? "0.8");
+const BUDGET_OPTIONS = ["Continue +$5", "Continue +$20", "No limit", "Leave it stopped"];
+
+// Resolve the ceilings that apply to this thread's next run.
+export function budgetFor(thread) {
+  const dflt = thread.plan_mode ? PLAN_BUDGET_USD : RUN_BUDGET_USD;
+  const run = thread.budget_usd == null ? dflt : thread.budget_usd;
+  const total = thread.budget_total_usd == null ? THREAD_BUDGET_USD : thread.budget_total_usd;
+  const spent = db.threadCost(thread.id);
+  const left = total > 0 ? Math.max(0, total - spent) : Infinity;
+  // The run may never be allowed more than what is left of the thread ceiling.
+  let cap = run > 0 ? run : Infinity;
+  if (left < cap) cap = left;
+  const unlimited = !Number.isFinite(cap);
+  // `unlimited` is what decides whether a --max-budget-usd flag is passed at
+  // all, so an exhausted thread can never be mistaken for an uncapped one: it
+  // gets a floor cap the run trips over at once. Fails closed, not open.
+  return { run, total, spent, left, unlimited, cap: unlimited ? 0 : Math.max(cap, 0.01) };
+}
+
 const LIMIT_RE = /(?:session|usage|rate)[ _-]?limit|limit reached|hit your .{0,20}limit/i;
 // Transient infrastructure failures worth an automatic retry: API/proxy 5xx
 // (e.g. "API Error: 500 Proxy error: 400 … Can not decode content-encoding:
@@ -246,6 +276,21 @@ function dispatchApproval(task) {
   return thread;
 }
 
+// The card the dashboard parks on when a ceiling is hit. spentThisRun is null
+// when the thread ceiling stopped us before any run was dispatched.
+function budgetAwaiting(thread, budget, spentThisRun) {
+  return {
+    budget: {
+      reason: spentThisRun == null ? "thread" : "run",
+      run_cap: budget.cap,
+      run_cost: spentThisRun,
+      thread_cap: budget.total,
+      thread_spent: db.threadCost(thread.id),
+    },
+    options: BUDGET_OPTIONS,
+  };
+}
+
 function emitEvent(ev) {
   const { seq, id } = db.insertEvent(ev);
   db.touchThread(ev.thread_id);
@@ -313,6 +358,9 @@ function ingestRecord(ctx, obj) {
     ctx.resultSeen = true;
     ctx.resultJson = JSON.stringify(obj);
     ctx.resultText = obj.result || "";
+    ctx.resultSubtype = obj.subtype || null;
+    // The CLI prices the run for us; never recompute it from tokens here.
+    ctx.costUsd = typeof obj.total_cost_usd === "number" ? obj.total_cost_usd : null;
     const u = obj.usage || {};
     emitEvent({
       ...common,
@@ -353,6 +401,17 @@ function handleLine(ctx, line) {
 // Kick off a run for an already-created turn. Returns immediately; ingest runs
 // in the background and streams to `bus`.
 export function startRun(thread, turn, kind) {
+  // Thread ceiling already spent — park without dispatching, so hitting the
+  // wall costs nothing. The turn stays run-less and /thread/budget re-dispatches
+  // this same turn once the ceiling is raised.
+  const budget = budgetFor(thread);
+  if (budget.total > 0 && budget.left <= 0) {
+    const awaiting = budgetAwaiting(thread, budget, null);
+    db.setThreadAwaiting(thread.id, awaiting);
+    bus.emit(thread.id, { t: "status", status: "awaiting" });
+    bus.emit(thread.id, { t: "awaiting", awaiting });
+    return null;
+  }
   const runId = db.createRun(thread.id, turn.id, kind);
   db.setTurnRun(turn.id, runId);
   ingest(thread, turn, runId, kind).catch((e) => {
@@ -425,6 +484,10 @@ async function ingest(thread, turn, runId, kind) {
   // Plan mode: Claude researches and proposes a plan (via ExitPlanMode) instead
   // of editing; the dashboard surfaces it for approval.
   if (thread.plan_mode) args.push("--permission-mode", "plan");
+  // Hard cost ceiling for this run. The CLI stops itself on overrun and says so
+  // in the result record, so nothing here has to watch the stream.
+  const budget = budgetFor(thread);
+  if (!budget.unlimited) args.push("--max-budget-usd", budget.cap.toFixed(4));
   // Fresh run: assign the session id up front so the thread maps immediately.
   // Resume: --resume alone continues that same session (passing --session-id
   // too is rejected unless --fork-session).
@@ -465,8 +528,12 @@ async function ingest(thread, turn, runId, kind) {
   }
 
   const wasStopped = stopping.delete(runId);
+  // The run walked into its own --max-budget-usd ceiling. Not a failure and not
+  // worth retrying: it needs a decision from the user, so it gets its own status
+  // and skips the transient-retry path below.
+  const budgetStop = ctx.resultSubtype === "error_max_budget_usd";
   const ok = exitCode === 0 && ctx.resultSeen;
-  const status = wasStopped ? "stopped" : ok ? "done" : "error";
+  const status = wasStopped ? "stopped" : budgetStop ? "budget" : ok ? "done" : "error";
 
   const fields = {
     status,
@@ -474,7 +541,12 @@ async function ingest(thread, turn, runId, kind) {
     finished_at: db.now(),
     stream_note: note,
     result_json: ctx.resultJson || null,
-    error: status === "error" ? errText || `exit ${exitCode}` || null : null,
+    cost_usd: ctx.costUsd ?? null,
+    error: budgetStop
+      ? `stopped at the $${budget.cap.toFixed(2)} ceiling for this run`
+      : status === "error"
+        ? errText || `exit ${exitCode}` || null
+        : null,
   };
 
   // usage-limit / transient-error detection → mark resumable + schedule. The
@@ -502,7 +574,9 @@ async function ingest(thread, turn, runId, kind) {
   //   2. a plan awaiting approval (ExitPlanMode, or any plan-mode run's output)
   // Either parks the thread as 'awaiting'; the answer/approval resumes it.
   let awaiting = null;
-  if (ok && !wasStopped) {
+  if (budgetStop) {
+    awaiting = budgetAwaiting(thread, budget, ctx.costUsd);
+  } else if (ok && !wasStopped) {
     const question = parseQuestion(ctx.resultText) || ctx.askQuestion;
     if (question) {
       awaiting = question;
@@ -514,6 +588,22 @@ async function ingest(thread, turn, runId, kind) {
   }
   if (awaiting) db.setThreadAwaiting(thread.id, awaiting);
   else db.setThreadStatus(thread.id, status);
+
+  // Finished, but close enough to the ceiling that the next run may not fit.
+  if (!budgetStop && !budget.unlimited && ctx.costUsd >= budget.cap * BUDGET_WARN_FRACTION) {
+    emitEvent({
+      thread_id: thread.id,
+      turn_id: turn.id,
+      run_id: runId,
+      type: "system",
+      name: "budget_warn",
+      text:
+        `this run cost $${ctx.costUsd.toFixed(2)} of its $${budget.cap.toFixed(2)} ceiling` +
+        (budget.total > 0
+          ? ` — $${db.threadCost(thread.id).toFixed(2)} of $${budget.total.toFixed(2)} used on this thread`
+          : ""),
+    });
+  }
 
   // Save any NOTES: trailer to the project notes (proxy's notes table).
   if (ctx.resultText) saveNotes(thread, ctx.resultText);
