@@ -33,8 +33,9 @@ const RUN_PROMPT_SUFFIX =
   process.env.RUN_PROMPT_SUFFIX ??
   "If something extra pops up that is worth returning to later (follow-up" +
     " work, proposals, ideas), do not do it now — end your final reply with a" +
-    " 'NOTES:' section listing each item as a '- [ ] item' line; it is saved" +
-    " to the project notes.";
+    " 'NOTES:' section listing each item as a '- [ ] item' line. The dashboard" +
+    " will offer these as choices to run right away; whatever isn't picked is" +
+    " saved to the project notes.";
 const RUN_NO_QUESTIONS =
   process.env.RUN_NO_QUESTIONS ??
   "This task was dispatched from the web dashboard and runs non-interactively —" +
@@ -112,6 +113,30 @@ const PLAN_OPTIONS = ["✓ Approve & run", "Revise the plan"];
 // killed run is reported as 'stopped', not 'error'.
 const stopping = new Set();
 const OPTION_RE = /^\s*[-*]\s+(.*\S)\s*$/;
+
+// Bullet line under a NOTES: trailer, with or without a checkbox marker:
+//   "- [ ] add tests"  /  "- [x] done"  /  "- add tests"
+const SUGGESTION_RE = /^\s*[-*]\s+(?:\[[ xX~]\]\s*)?(.+\S)\s*$/;
+
+// Parse the `NOTES:` trailer into a list of suggestion item strings (checkbox
+// markers stripped). Returns [] when there is no marker or no bullet items.
+function parseSuggestions(resultText) {
+  const m = NOTES_MARKER_RE.exec(resultText || "");
+  if (!m) return [];
+  const items = [];
+  // The marker line itself may carry the first item ("NOTES: - [ ] x" or
+  // "NOTES: do the thing").
+  const head = m[1].trim();
+  if (head) {
+    const hm = SUGGESTION_RE.exec(head);
+    items.push(hm ? hm[1].trim() : head);
+  }
+  for (const line of resultText.slice(m.index + m[0].length).split("\n")) {
+    const om = SUGGESTION_RE.exec(line);
+    if (om) items.push(om[1].trim());
+  }
+  return items.filter(Boolean);
+}
 
 // Parse a trailing `QUESTION:` block into { question, options[] }. Returns null
 // when there is no marker or no question text.
@@ -241,6 +266,7 @@ export function dispatchScheduled(task) {
   const thread = db.createThread(task.project, squashTitle(task.prompt));
   const branch = branchNameFor(thread.title, thread.id);
   db.setThreadBranch(thread.id, branch);
+  db.setThreadUnattended(thread.id);
   const parts = [RUN_UNATTENDED];
   if (RUN_LOCAL_ENV_NOTE) parts.push(RUN_LOCAL_ENV_NOTE);
   const as = agentsSuffix(task.agents);
@@ -414,6 +440,23 @@ function handleLine(ctx, line) {
   }
   ctx.processed++;
   ingestRecord(ctx, obj);
+}
+
+// Create a fresh thread and start its first run. Handles the common cases: a
+// new claude/* branch (default), or direct/no-branch mode. Callers wanting to
+// pin an existing branch should validate + set it themselves. Returns
+// { thread, branch }. Used by the composer route and the suggestions picker.
+export function dispatchNewThread(project, prompt, { plan = false, model = null, direct = false } = {}) {
+  const thread = db.createThread(project, squashTitle(prompt), !!plan, normalizeModel(model), !!direct);
+  let branch = null;
+  if (!direct) {
+    branch = branchNameFor(thread.title, thread.id);
+    db.setThreadBranch(thread.id, branch);
+  }
+  const sent = wrapPrompt(prompt, "new", { branch, direct: !branch && !!direct });
+  const turn = db.addTurn(thread.id, prompt, sent, null);
+  startRun(db.getThread(thread.id), turn, "new");
+  return { thread, branch };
 }
 
 // Kick off a run for an already-created turn. Returns immediately; ingest runs
@@ -602,6 +645,9 @@ async function ingest(thread, turn, runId, kind) {
       awaiting = { plan: ctx.plan || ctx.resultText || "", options: PLAN_OPTIONS };
     } else if (thread.plan_mode) {
       awaiting = { plan: ctx.resultText || "(no plan text)", options: PLAN_OPTIONS };
+    } else if (!thread.unattended) {
+      const suggestions = parseSuggestions(ctx.resultText);
+      if (suggestions.length) awaiting = { suggestions };
     }
   }
   if (awaiting) db.setThreadAwaiting(thread.id, awaiting);
@@ -623,8 +669,10 @@ async function ingest(thread, turn, runId, kind) {
     });
   }
 
-  // Save any NOTES: trailer to the project notes (proxy's notes table).
-  if (ctx.resultText) saveNotes(thread, ctx.resultText);
+  // Save any NOTES: trailer to the project notes — UNLESS we parked it as a
+  // suggestions picker (those items belong to the picker; whatever the user
+  // doesn't run is saved to notes when they resolve it).
+  if (ctx.resultText && !(awaiting && awaiting.suggestions)) saveNotes(thread, ctx.resultText);
 
   bus.emit(thread.id, {
     t: "status",
