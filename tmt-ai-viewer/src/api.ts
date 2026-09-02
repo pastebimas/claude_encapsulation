@@ -61,6 +61,8 @@ export const api = {
         ...(model === undefined ? {} : { model }),
       }),
     }),
+  resolveSuggestions: (id: string, run: string[]) =>
+    req("/api/thread/suggestions", { method: "POST", body: JSON.stringify({ id, run }) }),
   stopThread: (id: string) =>
     req("/api/thread/stop", { method: "POST", body: JSON.stringify({ id }) }),
   scheduleApproval: (id: string) =>
