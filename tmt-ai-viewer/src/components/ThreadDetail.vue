@@ -11,6 +11,7 @@ const followupText = ref("");
 const MODEL_OPTIONS = [
   { value: "", label: "Default model" },
   { value: "opus", label: "Opus" },
+  { value: "claude-fable-5-1", label: "Fable" },
   { value: "sonnet", label: "Sonnet" },
   { value: "haiku", label: "Haiku" },
 ];

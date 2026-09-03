@@ -27,10 +27,12 @@ watch(
 );
 
 // Model picker for the composer. "" = the CLI's configured default; the aliases
-// map to the latest of each tier, so they don't go stale. Choice is remembered.
+// map to the latest of each tier, so they don't go stale. Fable has no alias, so
+// it's pinned to an id. Choice is remembered.
 const MODEL_OPTIONS = [
   { value: "", label: "Default model" },
   { value: "opus", label: "Opus" },
+  { value: "claude-fable-5-1", label: "Fable" },
   { value: "sonnet", label: "Sonnet" },
   { value: "haiku", label: "Haiku" },
 ];
