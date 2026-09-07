@@ -33,6 +33,7 @@ const MODEL_OPTIONS = [
   { value: "opus", label: "Opus" },
   { value: "sonnet", label: "Sonnet" },
   { value: "haiku", label: "Haiku" },
+  { value: "fable", label: "Fable" },
 ];
 const model = ref(localStorage.getItem("tmt2-model") || "");
 watch(model, (m) => localStorage.setItem("tmt2-model", m));
@@ -269,17 +270,18 @@ async function openReq(b: any, project = store.currentProject) {
     <div id="main">
       <!-- usage bar -->
       <div class="usage-bar">
-        <span>tokens</span>
+        <span title="New tokens sent to Anthropic: input + output + cache-write. Excludes cache-read (context re-read). Your actual quota is the 5h / Week chips on the right →">new tokens ⓘ</span>
         <span class="usage-win">5m <b>{{ fmt(win(5).tokens) }}</b></span>
         <span class="usage-win">30m <b>{{ fmt(win(30).tokens) }}</b></span>
         <span class="usage-win">1h <b>{{ fmt(win(60).tokens) }}</b></span>
         <span class="usage-win">4h <b>{{ fmt(win(240).tokens) }}</b></span>
+        <span class="usage-win dim" title="Cached context re-read in the last hour — cheap, and NOT included in the figures on the left">+{{ fmt(win(60).cache_read || 0) }} re-read/1h</span>
         <span class="usage-win">{{ win(60).requests }} req/1h</span>
 
         <template v-if="store.limits.available">
           <span class="lim-chip" :class="limClass(store.limits.five_h)" style="margin-left: auto"
-            title="Anthropic 5-hour rolling limit">
-            5h <b>{{ pct(store.limits.five_h.utilization) }}</b>
+            title="Anthropic 5-hour rolling quota — THIS is your real limit; the token figures on the left are only a guide to what's driving it">
+            quota 5h <b>{{ pct(store.limits.five_h.utilization) }}</b>
             · resets {{ countdown(store.limits.five_h.reset) }}
           </span>
           <span class="lim-chip" :class="limClass(store.limits.seven_d)"

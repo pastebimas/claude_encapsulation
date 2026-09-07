@@ -13,6 +13,7 @@ const MODEL_OPTIONS = [
   { value: "opus", label: "Opus" },
   { value: "sonnet", label: "Sonnet" },
   { value: "haiku", label: "Haiku" },
+  { value: "fable", label: "Fable" },
 ];
 const followupModel = ref("");
 watch(
@@ -289,13 +290,14 @@ watch(
           <div class="content">{{ b.layout.finalText }}</div>
         </div>
         <div class="tokens" v-if="b.layout.usage">
-          <b>{{ n(b.layout.usage.used) }} tokens</b> this request
+          <b>{{ n(b.layout.usage.used) }} new tokens</b>
+          <span class="dim" title="These are what count toward the dashboard budget and drive most of your Anthropic quota">counted this request</span>
           <span class="dim">
-            ({{ n(b.layout.usage.in) }} in · {{ n(b.layout.usage.out) }} out ·
-            {{ n(b.layout.usage.cacheWrite) }} cache-write)
+            = {{ n(b.layout.usage.in) }} in + {{ n(b.layout.usage.out) }} out +
+            {{ n(b.layout.usage.cacheWrite) }} cache-write
           </span>
-          <span class="dim" title="Re-read of the cached context — never counted toward a ceiling">
-            + {{ n(b.layout.usage.cacheRead) }} cache-read
+          <span class="dim" title="The whole prior conversation re-read from cache. Cheap, and NOT part of the 'new tokens' figure — it just tracks how long this thread has grown.">
+            · plus {{ n(b.layout.usage.cacheRead) }} context re-read (not counted)
           </span>
         </div>
       </template>

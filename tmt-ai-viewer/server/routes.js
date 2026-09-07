@@ -1,7 +1,7 @@
 import { Router } from "express";
 import * as db from "./db.js";
 import * as auth from "./auth.js";
-import { bus, startRun, wrapPrompt, stopThread, dispatchScheduled, dispatchNewThread, normalizeModel } from "./claude.js";
+import { bus, startRun, wrapPrompt, stopThread, dispatchScheduled, dispatchNewThread, normalizeModel, COMPACT_ON_FOLLOWUP } from "./claude.js";
 import { schedulerConfig, saveSchedulerConfig, policyDecision } from "./scheduler.js";
 import { usageWindows, latestLimits } from "./usage.js";
 import { listNotes, addNote, updateNote } from "./projects.js";
@@ -159,7 +159,11 @@ router.post("/thread/followup", (req, res) => {
   });
   const turn = db.addTurn(thread.id, prompt, sent, null);
   db.setThreadStatus(thread.id, "running");
-  startRun(thread, turn, "resume");
+  // Compact first by default: a manual follow-up lands well after the prompt
+  // cache expired, so the resume re-caches the whole context regardless —
+  // shrinking it first makes that (and every later) re-cache cheaper. Only
+  // meaningful once a session exists (a prior run).
+  startRun(thread, turn, "resume", { compact: COMPACT_ON_FOLLOWUP && !!db.latestRun(id) });
   res.json({ ok: true, turn_id: turn.id });
 });
 

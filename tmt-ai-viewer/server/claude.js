@@ -18,6 +18,11 @@ bus.setMaxListeners(0);
 
 const RUN_TIMEOUT = parseInt(process.env.RUN_TIMEOUT || "3600", 10) * 1000;
 const RUN_GIT_PULL = (process.env.RUN_GIT_PULL ?? "1") !== "0";
+// Compact the session before a manual follow-up resume by default. Follow-ups
+// arrive after the prompt-cache TTL has expired, so every resume re-caches the
+// whole context (cache-write is what the ceilings count); shrinking it first
+// makes that re-cache — and all later ones — cheaper. Set to "0" to disable.
+export const COMPACT_ON_FOLLOWUP = (process.env.RUN_COMPACT_ON_FOLLOWUP ?? "1") !== "0";
 
 // Best-effort refresh before a run. Every guard makes it a safe no-op rather
 // than a risk: skip non-repos, skip a dirty tree (never touch local work), skip
@@ -189,7 +194,7 @@ function parseAskTool(input) {
 // the short aliases and any plain model id; anything else (or empty) → null,
 // meaning "use the CLI default". Guards the arg boundary even though it's shell-
 // quoted downstream.
-const MODEL_ALIASES = new Set(["opus", "sonnet", "haiku", "default"]);
+const MODEL_ALIASES = new Set(["opus", "sonnet", "haiku", "fable", "default"]);
 export function normalizeModel(m) {
   const s = String(m == null ? "" : m).trim();
   if (!s || s === "default") return null;

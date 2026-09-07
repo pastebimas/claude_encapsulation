@@ -57,7 +57,15 @@ export function usageWindows() {
     windows[minutes] = {
       minutes,
       requests,
-      tokens: (totals.input_tokens || 0) + (totals.output_tokens || 0),
+      // "new" tokens — the unit that reflects real work/cost: input + output +
+      // cache-write. This matches a request's `used` figure and the thread Σ, so
+      // all three finally agree. cache-read (the same context re-read, cheap) is
+      // kept as its own field and never folded in.
+      tokens:
+        (totals.input_tokens || 0) +
+        (totals.output_tokens || 0) +
+        (totals.cache_creation_tokens || 0),
+      cache_read: totals.cache_read_tokens || 0,
       ...totals,
     };
   }
