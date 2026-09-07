@@ -85,6 +85,7 @@ pre, code, .mono {
 }
 .usage-bar b { color: var(--text); }
 .usage-win { white-space: nowrap; }
+.usage-bar .dim { opacity: .6; }
 
 .project-header {
   display: flex; align-items: center; gap: 12px;
