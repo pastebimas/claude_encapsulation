@@ -56,3 +56,39 @@ fi
 
 git -C "$DIR" push "$REMOTE" "$REFSPEC"
 echo "done."
+
+# Suggest the PR target: among main/master/dev/develop, the local branch with
+# the most commits the others don't have (tie-break: newest commit). Matches
+# the base the dashboard split these branches from.
+BASE=""; bestn=-1; bestt=-1
+for c in main master dev develop; do
+    git -C "$DIR" show-ref --verify --quiet "refs/heads/$c" || continue
+    not=""
+    for o in main master dev develop; do
+        [ "$o" = "$c" ] && continue
+        git -C "$DIR" show-ref --verify --quiet "refs/heads/$o" && not="$not ^refs/heads/$o"
+    done
+    # shellcheck disable=SC2086
+    n="$(git -C "$DIR" rev-list --count "refs/heads/$c" $not -- 2>/dev/null || echo 0)"
+    t="$(git -C "$DIR" log -1 --format=%ct "refs/heads/$c" 2>/dev/null || echo 0)"
+    if [ "$n" -gt "$bestn" ] || { [ "$n" -eq "$bestn" ] && [ "$t" -gt "$bestt" ]; }; then
+        BASE="$c"; bestn="$n"; bestt="$t"
+    fi
+done
+if [ -n "$BASE" ]; then
+    echo
+    echo "Suggested PR target: '$BASE' (most ahead of main/master/dev)."
+    url="$(git -C "$DIR" remote get-url "$REMOTE" 2>/dev/null || true)"
+    url="${url%.git}"; hp=""
+    case "$url" in
+        git@*)      hp="${url#git@}"; hp="${hp/:/\/}" ;;
+        ssh://git@*) hp="${url#ssh://git@}" ;;
+        https://*)  hp="${url#https://}" ;;
+    esac
+    case "$hp" in
+        *github*)
+            for b in "${BRANCHES[@]}"; do
+                echo "  https://$hp/compare/$BASE...$b?expand=1"
+            done ;;
+    esac
+fi

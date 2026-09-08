@@ -50,12 +50,16 @@ checklists (toggle todo/doing/done, run a line as its own run), and a run
 can pause to ask a clarifying question you answer inline (it resumes the
 same session).
 
-Every request runs on its own git branch (`claude/<slug>-<id>`); Claude
+Every request runs on its own git branch (`claude/<slug>-<id>`), split from
+the best local base branch — among `main`/`master`/`dev`/`develop`, the one
+most ahead of the others (falling back to HEAD when none exist). Claude
 commits its changes to that branch locally (it never pushes — the container
 has no push credentials). The **Branches** panel lists each project's
 `claude/*` branches with their unpushed commit counts, a link back to the
 request that made them, and a clickable diff per branch/commit — so you can
-see what still needs pushing. Push them from the host (see below).
+see what still needs pushing. Push them from the host (see below); the
+"open PR" links and `bin/tmt-ai-push` both suggest that same base branch as
+the PR target.
 
 Raw SQL: <http://localhost:8001> (Datasette, bound to 127.0.0.1 only).
 Each project gets its own DB in the sidebar. Datasette only scans

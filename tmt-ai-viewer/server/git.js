@@ -28,6 +28,43 @@ const SAFE_SHA = /^[0-9a-fA-F]{4,40}$/;
 // Base branches surfaced first in the dashboard picker.
 const OTHER_BRANCH_PRIORITY = ["main", "master", "dev", "develop", "staging"];
 
+// New claude/task branches split from the best base branch instead of whatever
+// HEAD happens to be: among the local candidates below, the one with the most
+// commits not reachable from the other candidates ("most ahead"), tie-broken by
+// newest commit, then candidate order. The same pick is the suggested PR target.
+// This sh snippet sets $base to the winner (empty when none of them exist).
+const BASE_CANDIDATES = ["main", "master", "dev", "develop"];
+const PICK_BASE_SH =
+  `base=""; bn=-1; bt=-1; ` +
+  `for c in ${BASE_CANDIDATES.join(" ")}; do ` +
+  `git show-ref --verify --quiet "refs/heads/$c" || continue; ` +
+  `not=""; for o in ${BASE_CANDIDATES.join(" ")}; do ` +
+  `[ "$o" = "$c" ] && continue; ` +
+  `git show-ref --verify --quiet "refs/heads/$o" && not="$not ^refs/heads/$o"; ` +
+  `done; ` +
+  `n=$(git rev-list --count "refs/heads/$c" $not -- 2>/dev/null) || n=0; ` +
+  `t=$(git log -1 --format=%ct "refs/heads/$c" 2>/dev/null) || t=0; ` +
+  `if [ "$n" -gt "$bn" ] || { [ "$n" -eq "$bn" ] && [ "$t" -gt "$bt" ]; }; then ` +
+  `base="$c"; bn="$n"; bt="$t"; fi; ` +
+  `done`;
+
+// The best base branch to split from / target PRs at, or null when no candidate
+// exists (then callers fall back to HEAD, the old behavior). Never throws.
+export async function pickBaseBranch(project, user) {
+  if (!SAFE_PROJECT.test(project)) return null;
+  const script =
+    `cd "/workspace/${project}" 2>/dev/null || exit 0; ` +
+    `git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0; ` +
+    `${PICK_BASE_SH}; printf '%s\\n' "$base"`;
+  try {
+    const { stdout } = await execCollect(CODE_CONTAINER, ["sh", "-c", script], { user });
+    const base = (stdout.trim().split("\n").pop() || "").trim();
+    return SAFE_ANY_BRANCH.test(base) ? base : null;
+  } catch {
+    return null;
+  }
+}
+
 const FS = "\x1f"; // field separator for the branch-info script (unit separator)
 const DIFF_CAP = 200_000; // bytes of diff text returned to the browser
 
@@ -98,11 +135,13 @@ export async function ensureBranchRef(project, branch, user) {
       (await git(project, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], user))
         .exitCode === 0;
     if (!exists) {
-      const cr = await git(project, ["branch", branch], user);
+      const base = await pickBaseBranch(project, user);
+      const cr = await git(project, ["branch", branch, ...(base ? [base] : [])], user);
       if (cr.exitCode !== 0)
         return { ok: false, code: 500, error: "branch_failed", detail: (cr.stderr || "").trim() };
+      return { ok: true, reused: false, base };
     }
-    return { ok: true, reused: exists };
+    return { ok: true, reused: true };
   } catch (e) {
     return { ok: false, code: 500, error: "git_error", detail: e.message };
   }
@@ -153,18 +192,18 @@ export async function ensureWorktree(project, branch, user) {
     `abs="$(pwd)/${wt}"; ` +
     `if git worktree list --porcelain | grep -qxF "worktree $abs"; then echo "REUSED $abs"; exit 0; fi; ` +
     `[ -e "${wt}" ] && rm -rf "${wt}"; ` +
-    `git show-ref --verify --quiet "refs/heads/${branch}" || git branch "${branch}" >/dev/null 2>&1; ` +
+    `bb=""; if ! git show-ref --verify --quiet "refs/heads/${branch}"; then ` +
+    `${PICK_BASE_SH}; bb="$base"; git branch "${branch}" $bb >/dev/null 2>&1; fi; ` +
     `[ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "${branch}" ] && git checkout --detach >/dev/null 2>&1; ` +
-    `if git worktree add "${wt}" "${branch}" >/dev/null 2>&1; then echo "OK $abs"; else echo ERR; fi`;
+    `if git worktree add "${wt}" "${branch}" >/dev/null 2>&1; then echo "OK $abs $bb"; else echo ERR; fi`;
   try {
     const { stdout } = await execCollect(CODE_CONTAINER, ["sh", "-c", script], { user });
     const line = (stdout.trim().split("\n").pop() || "").trim();
-    const sp = line.indexOf(" ");
-    const tag = sp === -1 ? line : line.slice(0, sp);
-    const path = sp === -1 ? "" : line.slice(sp + 1);
+    // Space-separated fields; paths are /workspace/<safe>/… so never contain one.
+    const [tag, path = "", base = ""] = line.split(" ");
     if (tag === "NOREPO") return { ok: false, error: "not_a_git_repo" };
     if ((tag === "OK" || tag === "REUSED") && path)
-      return { ok: true, path, reused: tag === "REUSED" };
+      return { ok: true, path, reused: tag === "REUSED", base: base || null };
     return { ok: false, error: "worktree_failed" };
   } catch (e) {
     return { ok: false, error: "git_error", detail: e.message };
@@ -208,17 +247,26 @@ export async function pruneWorktrees(project, user) {
 
 // "Create pull request" URL for a branch on a GitHub/Bitbucket remote. Built
 // from the remote URL alone, so it works whether or not the branch is pushed
-// yet — the host just shows nothing to compare until it is.
-export function prUrlFor(remoteUrl, branch) {
+// yet — the host just shows nothing to compare until it is. With a base branch
+// the URL pre-targets it (GitHub compare view / Bitbucket dest) instead of the
+// remote's default branch.
+export function prUrlFor(remoteUrl, branch, base) {
   const m = /^(?:(?:https?|ssh|git):\/\/)?(?:[^@/]+@)?([^/:]+)[/:](.+?)(?:\.git)?\/?$/.exec(
     String(remoteUrl || "").trim()
   );
   if (!m || !branch) return null;
   const [, host, repoPath] = m;
+  const enc = (b) => b.split("/").map(encodeURIComponent).join("/");
   if (/github/i.test(host))
-    return `https://${host}/${repoPath}/pull/new/${branch.split("/").map(encodeURIComponent).join("/")}`;
+    return base
+      ? `https://${host}/${repoPath}/compare/${enc(base)}...${enc(branch)}?expand=1`
+      : `https://${host}/${repoPath}/pull/new/${enc(branch)}`;
   if (/bitbucket/i.test(host))
-    return `https://${host}/${repoPath}/pull-requests/new?source=${encodeURIComponent(branch)}&t=1`;
+    return (
+      `https://${host}/${repoPath}/pull-requests/new?source=${encodeURIComponent(branch)}` +
+      (base ? `&dest=${encodeURIComponent(base)}` : "") +
+      `&t=1`
+    );
   return null;
 }
 
@@ -235,6 +283,7 @@ export async function gitBranchInfo(project) {
     `printf 'DIRTY\\037%s\\n' "$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"; ` +
     `printf 'REMOTE\\037%s\\n' "$(git remote 2>/dev/null | head -n1)"; ` +
     `printf 'REMOTE_URL\\037%s\\n' "$(git remote get-url "$(git remote 2>/dev/null | head -n1)" 2>/dev/null)"; ` +
+    `${PICK_BASE_SH}; printf 'BASE\\037%s\\n' "$base"; ` +
     `git for-each-ref --format='%(refname:short)' refs/heads/claude/ 2>/dev/null | while IFS= read -r b; do ` +
     `[ -n "$b" ] || continue; ` +
     `up=$(git rev-list --count "$b" --not --remotes 2>/dev/null); ` +
@@ -262,6 +311,7 @@ export async function gitBranchInfo(project) {
     dirty: 0,
     remote: "",
     remote_url: "",
+    base_branch: "",
     branches: [],
     other_branches: [],
   };
@@ -291,6 +341,9 @@ export async function gitBranchInfo(project) {
       case "REMOTE_URL":
         info.remote_url = p[1] || "";
         break;
+      case "BASE":
+        info.base_branch = p[1] || "";
+        break;
       case "BRANCH":
         ensure(p[1]).unpushed = parseInt(p[2] || "0", 10) || 0;
         break;
@@ -314,7 +367,7 @@ export async function gitBranchInfo(project) {
   });
   // Most-recently-touched branch first.
   info.branches.sort((a, b) => (b.last?.date || "").localeCompare(a.last?.date || ""));
-  for (const b of info.branches) b.pr_url = prUrlFor(info.remote_url, b.name);
+  for (const b of info.branches) b.pr_url = prUrlFor(info.remote_url, b.name, info.base_branch);
   return info;
 }
 
