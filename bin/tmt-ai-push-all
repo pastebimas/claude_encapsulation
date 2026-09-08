@@ -22,6 +22,11 @@
 # request" URL. This tool collects those URLs and prints them at the end (and
 # opens them with --open). Actually creating the PR needs their REST API.
 #
+# After pushing it also prints, per project, a suggested PR target branch
+# (main/master/dev/develop — whichever is most ahead of the others, the base
+# these branches split from) plus ready-made GitHub compare URLs. Mirrors the
+# suggestion bin/tmt-ai-push prints for a single project.
+#
 # "Unpushed" is counted against local remote-tracking refs, so run
 # `git fetch --all` first if those might be stale.
 #
@@ -50,7 +55,7 @@ while [ $# -gt 0 ]; do
         --open) OPEN=1; shift ;;
         -r|--remote) REMOTE="${2:?--remote needs a value}"; shift 2 ;;
         -h|--help)
-            grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,26p'
+            grep '^#' "$0" | sed 's/^# \{0,1\}//' | sed -n '2,31p'
             exit 0 ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;
         *) ROOT="$1"; shift ;;
@@ -118,6 +123,43 @@ others_note() {
     fi
 }
 
+# Suggest the PR target for one repo: among main/master/dev/develop, the local
+# branch with the most commits the others don't have (tie-break: newest commit).
+# Matches the base the dashboard split these branches from. Mirrors tmt-ai-push.
+# Echoes the base branch name, or nothing if none of those branches exist.
+suggest_base() {
+    local dir="$1" c o not n t BASE="" bestn=-1 bestt=-1
+    for c in main master dev develop; do
+        git -C "$dir" show-ref --verify --quiet "refs/heads/$c" || continue
+        not=""
+        for o in main master dev develop; do
+            [ "$o" = "$c" ] && continue
+            git -C "$dir" show-ref --verify --quiet "refs/heads/$o" && not="$not ^refs/heads/$o"
+        done
+        # shellcheck disable=SC2086
+        n="$(git -C "$dir" rev-list --count "refs/heads/$c" $not -- 2>/dev/null || echo 0)"
+        t="$(git -C "$dir" log -1 --format=%ct "refs/heads/$c" 2>/dev/null || echo 0)"
+        if [ "$n" -gt "$bestn" ] || { [ "$n" -eq "$bestn" ] && [ "$t" -gt "$bestt" ]; }; then
+            BASE="$c"; bestn="$n"; bestt="$t"
+        fi
+    done
+    printf '%s' "$BASE"
+}
+
+# Echo the "host/path" of a repo's remote URL when it's a recognisable web host,
+# so compare URLs can be built. Empty for unknown/opaque remotes.
+remote_host_path() {
+    local dir="$1" url hp=""
+    url="$(git -C "$dir" remote get-url "$REMOTE" 2>/dev/null || true)"
+    url="${url%.git}"
+    case "$url" in
+        git@*)       hp="${url#git@}"; hp="${hp/:/\/}" ;;
+        ssh://git@*) hp="${url#ssh://git@}" ;;
+        https://*)   hp="${url#https://}" ;;
+    esac
+    printf '%s' "$hp"
+}
+
 # Nothing to push? (claude/*, plus others only when --push-others)
 push_count=${#P_REPO[@]}
 [ "$PUSH_OTHERS" -eq 1 ] && push_count=$((push_count + ${#O_REPO[@]}))
@@ -176,6 +218,9 @@ echo
 pushed=0; failed=0
 declare -A DONE_REPO
 declare -a PR_URLS
+# Successfully-pushed branches grouped per repo, for the PR-target suggestion.
+declare -A SUCC_BRANCHES
+declare -a SUCC_ORDER
 for i in "${!PUSH_REPO[@]}"; do
     r="${PUSH_REPO[$i]}"; b="${PUSH_BRANCH[$i]}"
     printf '== %s : %s ==\n' "${r##*/}" "$b"
@@ -187,6 +232,8 @@ for i in "${!PUSH_REPO[@]}"; do
     rc=${PIPESTATUS[0]}
     if [ "$rc" -eq 0 ]; then
         pushed=$((pushed + 1)); DONE_REPO["$r"]=1
+        [ -n "${SUCC_BRANCHES[$r]+x}" ] || SUCC_ORDER+=("$r")
+        SUCC_BRANCHES["$r"]+="$b"$'\n'
         # Bitbucket: .../pull-requests/new?source=<branch>...
         # GitHub:    .../pull/new/<branch>  (or /compare/...)
         url="$(grep -oE 'https://[^ ]*/(pull-requests/new|pull/new|compare)[^ ]*' "$out" | head -n1)"
@@ -211,6 +258,28 @@ if [ "${#PR_URLS[@]}" -gt 0 ]; then
             echo "(--open: no xdg-open on this host — open the URLs above manually.)"
         fi
     fi
+fi
+
+# Per-project PR-target suggestion (only for repos we actually pushed to).
+if [ "${#SUCC_ORDER[@]}" -gt 0 ]; then
+    echo "Suggested PR target per project (base most ahead of main/master/dev — where these branches split from):"
+    for r in "${SUCC_ORDER[@]}"; do
+        base="$(suggest_base "$r")"
+        if [ -z "$base" ]; then
+            echo "  ${r##*/}/  → (no main/master/dev/develop branch to target)"
+            continue
+        fi
+        echo "  ${r##*/}/  → '$base'"
+        hp="$(remote_host_path "$r")"
+        case "$hp" in
+            *github*)
+                while IFS= read -r b; do
+                    [ -n "$b" ] && [ "$b" != "$base" ] || continue
+                    echo "      https://$hp/compare/$base...$b?expand=1"
+                done <<< "${SUCC_BRANCHES[$r]}" ;;
+        esac
+    done
+    echo
 fi
 
 echo "Pushed $pushed branch(es) across ${#DONE_REPO[@]} repo(s); $failed failed."
