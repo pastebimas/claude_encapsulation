@@ -93,6 +93,37 @@ export const api = {
           ? `commit=${encodeURIComponent(opts.commit)}`
           : `branch=${encodeURIComponent(opts.branch || "")}`)
     ),
+
+  hideRequest: (project: string, id: string) =>
+    req(`/api/request/${encodeURIComponent(id)}/hide`, {
+      method: "POST",
+      body: JSON.stringify({ project }),
+    }),
+  unhideRequest: (project: string, id: string) =>
+    req(`/api/request/${encodeURIComponent(id)}/unhide`, {
+      method: "POST",
+      body: JSON.stringify({ project }),
+    }),
+  toggleRequestHidden: (project: string, id: string) =>
+    req(`/api/request/${encodeURIComponent(id)}/toggle`, {
+      method: "POST",
+      body: JSON.stringify({ project }),
+    }),
+  deleteRequest: (project: string, id: string) =>
+    req(`/api/request/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ project }),
+    }),
+  hideRequestsByFilter: (project: string, filter: any) =>
+    req("/api/requests/hide", {
+      method: "POST",
+      body: JSON.stringify({ project, filter }),
+    }),
+  deleteRequestsByFilter: (project: string, filter: any) =>
+    req("/api/requests/delete", {
+      method: "POST",
+      body: JSON.stringify({ project, filter }),
+    }),
 };
 
 export function openStream(id: string, since: number, onMessage: (m: any) => void): EventSource {
