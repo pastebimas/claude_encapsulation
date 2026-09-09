@@ -11,6 +11,15 @@ import {
   projectContext,
 } from "./docker.js";
 import { gitBranchInfo, gitDiff, localBranchExists } from "./git.js";
+import {
+  hideRequest,
+  unhideRequest,
+  deleteRequest,
+  toggleHidden,
+  getRequest,
+  hideRequestsByFilter,
+  deleteRequestsByFilter,
+} from "./requestLogs.js";
 
 const router = Router();
 
@@ -477,6 +486,83 @@ router.get("/scheduler/config", (req, res) => {
 router.put("/scheduler/config", (req, res) => {
   const cfg = saveSchedulerConfig(req.body || {});
   res.json({ config: cfg, decision: policyDecision(cfg, latestLimits()) });
+});
+
+// -- request logs (hide/delete) --------------------------------------------------
+router.post("/request/:id/hide", (req, res) => {
+  const { project } = req.body || {};
+  if (!project) return res.status(400).json({ error: "project required" });
+  try {
+    const request = getRequest(project, String(req.params.id));
+    if (!request) return res.status(404).json({ error: "request not found" });
+    const changed = hideRequest(project, request.id);
+    res.json({ ok: changed, hidden: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post("/request/:id/unhide", (req, res) => {
+  const { project } = req.body || {};
+  if (!project) return res.status(400).json({ error: "project required" });
+  try {
+    const request = getRequest(project, String(req.params.id));
+    if (!request) return res.status(404).json({ error: "request not found" });
+    const changed = unhideRequest(project, request.id);
+    res.json({ ok: changed, hidden: false });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post("/request/:id/toggle", (req, res) => {
+  const { project } = req.body || {};
+  if (!project) return res.status(400).json({ error: "project required" });
+  try {
+    const request = getRequest(project, String(req.params.id));
+    if (!request) return res.status(404).json({ error: "request not found" });
+    toggleHidden(project, request.id);
+    const updated = getRequest(project, request.id);
+    res.json({ ok: true, hidden: updated.hidden });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.delete("/request/:id", (req, res) => {
+  const { project } = req.body || {};
+  if (!project) return res.status(400).json({ error: "project required" });
+  try {
+    const request = getRequest(project, String(req.params.id));
+    if (!request) return res.status(404).json({ error: "request not found" });
+    const deleted = deleteRequest(project, request.id);
+    res.json({ ok: deleted });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Bulk operations for hiding/deleting requests
+router.post("/requests/hide", (req, res) => {
+  const { project, filter } = req.body || {};
+  if (!project) return res.status(400).json({ error: "project required" });
+  try {
+    const count = hideRequestsByFilter(project, filter || {});
+    res.json({ ok: true, hidden: count });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post("/requests/delete", (req, res) => {
+  const { project, filter } = req.body || {};
+  if (!project) return res.status(400).json({ error: "project required" });
+  try {
+    const count = deleteRequestsByFilter(project, filter || {});
+    res.json({ ok: true, deleted: count });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 export default router;

@@ -202,6 +202,26 @@ see `claude-config/settings.json` to adjust. The proxy redacts
 `Authorization`, `X-Claude-Code-Session-Id`, `Cookie`, and similar
 headers before logging.
 
+## Managing Request Logs
+
+Request logs accumulate over time. You can hide or delete requests you no longer need:
+
+```bash
+# Hide a request (soft delete — can be restored)
+curl -X POST http://localhost:8035/api/request/{id}/hide \
+  -H "Content-Type: application/json" \
+  -d '{"project": "my-project"}'
+
+# Permanently delete a request
+curl -X DELETE http://localhost:8035/api/request/{id} \
+  -H "Content-Type: application/json" \
+  -d '{"project": "my-project"}'
+```
+
+Hidden requests don't appear in Datasette by default but can be unhidden
+or permanently deleted later. See `MANAGING_REQUESTS.md` for complete
+documentation, bulk operations, and SQL examples.
+
 ## Cleanup
 
 ```bash
