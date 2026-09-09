@@ -559,7 +559,8 @@ async function ingest(thread, turn, runId, kind, opts = {}) {
       type: "system",
       name: "git_branch",
       text: wt.ok
-        ? `on ${thread.branch} — worktree ${wt.reused ? "reused" : "created"}`
+        ? `on ${thread.branch} — worktree ${wt.reused ? "reused" : "created"}` +
+          (wt.base ? ` (split from ${wt.base})` : "")
         : `worktree skipped: ${wt.error}${wt.detail ? ` — ${wt.detail}` : ""} (main tree)`,
     });
     if (wt.ok) workdir = wt.path;

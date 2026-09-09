@@ -204,6 +204,7 @@ const branchGroups = computed(() => {
       project: p.project,
       current: p.current,
       dirty: p.dirty,
+      base_branch: p.base_branch || "",
       unpushed_total: p.unpushed_total,
       branches: p.branches || [],
     }));
@@ -215,6 +216,7 @@ const branchGroups = computed(() => {
       project: store.currentProject,
       current: g.current,
       dirty: g.dirty,
+      base_branch: g.base_branch || "",
       unpushed_total: (g.branches || []).reduce((n: number, b: any) => n + (b.unpushed || 0), 0),
       branches: g.branches || [],
     },
@@ -627,12 +629,13 @@ async function openReq(b: any, project = store.currentProject) {
                     :href="b.pr_url"
                     target="_blank"
                     rel="noopener"
-                    :title="b.unpushed > 0
-                      ? 'open a pull request on the remote — this branch still has unpushed commits, push first for them to show up'
-                      : 'open a pull request for this branch on the remote'"
+                    :title="(g.base_branch
+                      ? `open a pull request into ${g.base_branch} (the most-ahead base branch)`
+                      : 'open a pull request for this branch on the remote')
+                      + (b.unpushed > 0 ? ' — this branch still has unpushed commits, push first for them to show up' : '')"
                     @click.stop
                   >
-                    open PR ↗
+                    open PR{{ g.base_branch ? ` → ${g.base_branch}` : "" }} ↗
                   </a>
                   <button
                     v-if="b.thread_id"
